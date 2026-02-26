@@ -23,6 +23,7 @@
 * [MinGW-w64 _(preferably with a full setup)_](https://www.mingw-w64.org/)
 * [Git](https://git-scm.com/)
 * [Boost C++ Libraries (If using MSYS2, follow the Arch Linux process below)](https://www.boost.org/)
+* [NASM](https://www.nasm.us/)
 
 If you are using Ubuntu WSL, you can install the required dependencies using:
 
