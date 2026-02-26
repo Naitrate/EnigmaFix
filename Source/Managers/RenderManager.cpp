@@ -206,6 +206,131 @@ bool cbResize(ID3D11DeviceContext* pContext, D3D11_RENDER_TARGET_VIEW_DESC pDesc
     return false;
 }
 
+void cbPatchYebis(ID3D11DeviceContext* pContext)
+{
+    if (!PlayerSettingsRm.RES.UseCustomRes) return;
+    if (InternalHorizontalRes <= 1920 && InternalVerticalRes <= 1080) return; // Only needed above 1080p
+
+    // --- 1. Get the VS constant buffer at slot 0 ---
+    ID3D11Buffer* vsBuffer = nullptr;
+    pContext->VSGetConstantBuffers(0, 1, &vsBuffer);
+    if (!vsBuffer) return;
+
+    D3D11_BUFFER_DESC bufDesc = {};
+    vsBuffer->GetDesc(&bufDesc);
+
+    // Verify this is the YEBIS $Globals buffer by size.
+    // The analysis confirmed it needs to be at least 2496 bytes to contain am44_TransformMatrix.
+    if (bufDesc.ByteWidth < 2496) {
+        vsBuffer->Release();
+        return;
+    }
+
+    // --- 2. Build a staging replacement buffer (once, or lazily) ---
+    // We create a DYNAMIC mirror if one doesn't exist for this byte width.
+    static std::map<UINT, ID3D11Buffer*> yebisBuffers;
+    ID3D11Buffer* patchBuffer = nullptr;
+    ID3D11Device* dev = nullptr;
+
+    auto iter = yebisBuffers.find(bufDesc.ByteWidth);
+    if (iter == yebisBuffers.cend()) {
+        pContext->GetDevice(&dev);
+
+        D3D11_BUFFER_DESC patchDesc = {};
+        patchDesc.ByteWidth      = bufDesc.ByteWidth;
+        patchDesc.Usage          = D3D11_USAGE_DYNAMIC;
+        patchDesc.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        patchDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+        dev->CreateBuffer(&patchDesc, nullptr, &patchBuffer);
+        yebisBuffers[bufDesc.ByteWidth] = patchBuffer;
+        dev->Release();
+    } else {
+        patchBuffer = iter->second;
+    }
+
+    if (!patchBuffer) { vsBuffer->Release(); return; }
+
+    // --- 3. Copy the original buffer contents via a staging buffer ---
+    // We need to read the GPU buffer to avoid clobbering unrelated constants.
+    // This requires a STAGING buffer for the readback.
+    static std::map<UINT, ID3D11Buffer*> stagingBuffers;
+    ID3D11Buffer* stagingBuffer = nullptr;
+
+    auto stageIter = stagingBuffers.find(bufDesc.ByteWidth);
+    if (stageIter == stagingBuffers.cend()) {
+        pContext->GetDevice(&dev);
+
+        D3D11_BUFFER_DESC stageDesc = {};
+        stageDesc.ByteWidth      = bufDesc.ByteWidth;
+        stageDesc.Usage          = D3D11_USAGE_STAGING;
+        stageDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+        dev->CreateBuffer(&stageDesc, nullptr, &stagingBuffer);
+        stagingBuffers[bufDesc.ByteWidth] = stagingBuffer;
+        dev->Release();
+    } else {
+        stagingBuffer = stageIter->second;
+    }
+
+    if (!stagingBuffer) { vsBuffer->Release(); return; }
+
+    // Copy GPU -> staging so we can read it
+    pContext->CopyResource(stagingBuffer, vsBuffer);
+
+    D3D11_MAPPED_SUBRESOURCE stageMap = {};
+    HRESULT hr = pContext->Map(stagingBuffer, 0, D3D11_MAP_READ, 0, &stageMap);
+    if (FAILED(hr)) { vsBuffer->Release(); return; }
+
+    // Copy the raw data into a local heap buffer we can modify
+    std::vector<uint8_t> bufData(bufDesc.ByteWidth);
+    memcpy(bufData.data(), stageMap.pData, bufDesc.ByteWidth);
+    pContext->Unmap(stagingBuffer, 0);
+
+    // --- 4. Patch am44_TransformMatrix at offset 2048 ---
+    // Each matrix is 64 bytes (4x float4). The analysis found up to 8 matrices.
+    // We scale X and Y diagonal elements (offsets 0 and 20 bytes into each matrix).
+    const float scaleX = static_cast<float>(InternalHorizontalRes) / 1920.0f;
+    const float scaleY = static_cast<float>(InternalVerticalRes)   / 1080.0f;
+
+    constexpr size_t matrixBaseOffset = 2048;
+    constexpr size_t matrixSize       = 64;   // sizeof(float4x4)
+    constexpr int    numMatrices      = 7;    // Analysis confirmed first 7 are UV transform matrices
+
+    for (int i = 0; i < numMatrices; ++i) {
+        size_t base = matrixBaseOffset + (i * matrixSize);
+
+        // Sanity check — don't write out of bounds
+        if (base + matrixSize > bufData.size()) break;
+
+        float* mat = reinterpret_cast<float*>(bufData.data() + base);
+
+        // Row-major float4x4 layout:
+        // [0]  = M[0][0] = X scale  <-- patch this
+        // [5]  = M[1][1] = Y scale  <-- patch this
+        // [10] = M[2][2] = Z scale  (leave alone)
+        // [15] = M[3][3] = W/homogeneous (leave alone)
+
+        // Only scale if the matrix looks like it has a non-zero diagonal
+        // (avoids stomping on matrices used for other purposes)
+        if (mat[0] != 0.0f) mat[0] *= scaleX;
+        if (mat[5] != 0.0f) mat[5] *= scaleY;
+    }
+
+    // --- 5. Write the patched data into the dynamic patch buffer and bind it ---
+    D3D11_MAPPED_SUBRESOURCE patchMap = {};
+    hr = pContext->Map(patchBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &patchMap);
+    if (SUCCEEDED(hr)) {
+        memcpy(patchMap.pData, bufData.data(), bufDesc.ByteWidth);
+        pContext->Unmap(patchBuffer, 0);
+        pContext->VSSetConstantBuffers(0, 1, &patchBuffer);
+        spdlog::info("Patched YEBIS VS constant buffer ({}x{} -> scaled {}x{}).",
+                     1920, 1080, InternalHorizontalRes, InternalVerticalRes);
+    }
+
+    vsBuffer->Release();
+}
+
 bool vpResize(ID3D11DeviceContext* pContext)
 {
     if (PlayerSettingsRm.RES.UseCustomRes) {
@@ -264,7 +389,7 @@ bool vpResize(ID3D11DeviceContext* pContext)
                                     vp.Height = static_cast<FLOAT>(texdesc.Height);
                                     pContext->RSSetViewports(1, &vp);
                                     spdlog::info("Set viewport to size {}x{}.", vp.Width, vp.Height);
-                                    cbResize(pContext, desc, texdesc, vp); // We should run the constant buffer modification right after viewport resizing.
+                                    //cbResize(pContext, desc, texdesc, vp); // We should run the constant buffer modification right after viewport resizing.
                                     return true;
                                 }
                             }
@@ -573,6 +698,7 @@ namespace EnigmaFix {
 
         if ((IndexCount == 3 || IndexCount == 4) && StartIndexLocation == 0 && BaseVertexLocation == 0) { // NOTE: For some reason, some render targets have three indexes.
             preDraw = vpResize(pContext) && srResize(pContext);
+            cbPatchYebis(pContext);
         }
         // Checks if both the viewports and scissor rects haven't been resized, and then return oDrawIndexed. I may need to find a better way of doing this to account for one not passing.
         if (!preDraw) {

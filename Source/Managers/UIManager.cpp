@@ -20,8 +20,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 **/
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-security"
+#if defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wformat-security"
+#endif
+
+#define NOMINMAX
 
 // Internal Functionality
 #include "UIManager.h"
@@ -563,4 +567,6 @@ namespace EnigmaFix {
     }
 }
 
+#if defined(__GNUC__)
 #pragma GCC diagnostic pop
+#endif

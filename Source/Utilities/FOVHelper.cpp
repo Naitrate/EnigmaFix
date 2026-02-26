@@ -21,6 +21,7 @@ SOFTWARE.
 **/
 
 // Internal Functionality
+#define _USE_MATH_DEFINES
 #include "FOVHelper.h"
 
 namespace FOV {

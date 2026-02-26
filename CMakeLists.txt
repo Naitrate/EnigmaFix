@@ -8,6 +8,11 @@ set(MINGW_TOOLCHAIN_PREFIX      x86_64-w64-mingw32)
 set(ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Resources/EnigmaFix_Icon.ico")
 set(RESOURCE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Resources/Resources.rc")
 
+# If using MinGW, add the necessary compile definition so WinUser.h works properly.
+if(MINGW)
+    add_compile_definitions(_WIN32_WINNT=0x0605 WINVER=0x0605)
+endif()
+
 if (UNIX) # If compiling on Linux, manually configure MingW-64.
     set(CMAKE_C_COMPILER ${MINGW_TOOLCHAIN_PREFIX}-gcc)
     set(CMAKE_CXX_COMPILER ${MINGW_TOOLCHAIN_PREFIX}-g++)
@@ -46,8 +51,14 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -DDEBUG -ggdb3")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -DDEBUG -ggdb3")
 
 # Set compile flags for release builds, this should strip the debug symbols and optimizes it.
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O2 -s")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -s")
+if(MINGW)
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O2 -s")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -s")
+elseif(MSVC)
+    # MSVC uses its own optimization flags
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG")
+endif()
 
 # Uncomment these flags if you need verbose output for whatever reason.
 #set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -128,14 +139,6 @@ set(JSON_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/Source/ThirdParty/JSON")
 message(STATUS "Using JSON from submodule...")
 add_subdirectory("${JSON_SOURCE_DIR}")
 
-## STB
-set(STB_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/Source/ThirdParty/STB")
-message(STATUS "Using STB from submodule...")
-add_library(stb STATIC
-        ${STB_SOURCE_DIR}/stb_image.h
-)
-set_target_properties(stb PROPERTIES LINKER_LANGUAGE CXX)
-
 # Now finally export our library file.
 ## Setup the project and set a few variables
 project(EnigmaFix)
@@ -179,13 +182,30 @@ add_library(EnigmaFix SHARED
         Source/Utilities/ColorHelper.h
         ${RESOURCE_FILE}
 )
+
+## STB (We need to set this after EnigmaFix due to some MSVC discrepancies).
+set(STB_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/Source/ThirdParty/STB")
+message(STATUS "Using STB from submodule...")
+if(MINGW)
+    add_library(stb STATIC ${STB_SOURCE_DIR}/stb_image.h)
+    set_target_properties(stb PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(EnigmaFix PRIVATE stb)
+    add_dependencies(EnigmaFix stb)
+else() # MSVC
+    target_include_directories(EnigmaFix PRIVATE "${STB_SOURCE_DIR}")
+endif()
+
 ## Add the dependencies we set up previously.
 # NOTE: Add "" to the "add_dependencies" section when you finally get that shit working.
-add_dependencies(EnigmaFix imgui kiero safetyhook inipp nlohmann_json spdlog stb)
-target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog stb)
+add_dependencies(EnigmaFix imgui kiero safetyhook inipp nlohmann_json spdlog)
+target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog)
 #target_link_libraries(EnigmaFix d3dcompiler imgui kiero inipp ${Boost_LIBRARIES})
 ## Set up our linker flags for compiling.
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++ -static -municode -Wl,--file-alignment=4096")
+if(MINGW)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++ -static -municode -Wl,--file-alignment=4096")
+elseif(MSVC)
+    set(CMAKE_SHARED_LINKER_FLAGS "") # MSVC doesn’t need GCC flags
+endif()
 # Renames our output to an ASI extension for use with Ultimate ASI Loader.
 set_target_properties(EnigmaFix PROPERTIES PREFIX "" OUTPUT_NAME EnigmaFix SUFFIX ".asi")
 ## Now we delete any miscellaneous .a static library files for release builds, as we don't need them.

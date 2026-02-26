@@ -6,6 +6,7 @@ There's some things that I modified or added, such as getting a list of availabl
 **/
 
 #include "DisplayHelper.h"
+#include <winuser.h>
 
 namespace Util
 {
