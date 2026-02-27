@@ -208,7 +208,7 @@ bool cbResize(ID3D11DeviceContext* pContext, D3D11_RENDER_TARGET_VIEW_DESC pDesc
 
 void cbPatchYebis(ID3D11DeviceContext* pContext)
 {
-    if (&PlayerSettingsRm.RES.UseCustomRes) return;
+    if (!PlayerSettingsRm.RES.UseCustomRes) return;
     if (*InternalHorizontalRes != 1920 || *InternalVerticalRes != 1080) return; // Only needed when the resolution isn't 1920x1080
 
     // --- 1. Get the VS constant buffer at slot 0 ---
