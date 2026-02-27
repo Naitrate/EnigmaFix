@@ -51,7 +51,7 @@ namespace EnigmaFix {
 
         struct ResolutionSettings {
             // Resolution Related Settings
-            bool UseCustomRes         = false;
+            bool UseCustomRes         = true;
             bool UseCustomResScale    = true;
             int  CustomResScale       = 100;  // Eventually will be used for upscaling/supersampling support.
             Util::DesktopResolution Resolution = { 1920, 1080 };

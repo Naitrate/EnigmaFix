@@ -208,7 +208,7 @@ bool cbResize(ID3D11DeviceContext* pContext, D3D11_RENDER_TARGET_VIEW_DESC pDesc
 
 void cbPatchYebis(ID3D11DeviceContext* pContext)
 {
-    if (!PlayerSettingsRm.RES.UseCustomRes) return;
+    if (&PlayerSettingsRm.RES.UseCustomRes) return;
     if (*InternalHorizontalRes != 1920 || *InternalVerticalRes != 1080) return; // Only needed when the resolution isn't 1920x1080
 
     // --- 1. Get the VS constant buffer at slot 0 ---
@@ -331,6 +331,86 @@ void cbPatchYebis(ID3D11DeviceContext* pContext)
     vsBuffer->Release();
 }
 
+void cbPatchMizuchiCopyback(ID3D11DeviceContext* pContext)
+{
+    if (!PlayerSettingsRm.RES.UseCustomRes) return;
+
+    ID3D11Buffer* vsBuffer = nullptr;
+    pContext->VSGetConstantBuffers(0, 1, &vsBuffer);
+    if (!vsBuffer) return;
+
+    D3D11_BUFFER_DESC bufDesc = {};
+    vsBuffer->GetDesc(&bufDesc);
+
+    // Identify by the exact size of this $Globals buffer (160 bytes, 4 variables)
+    if (bufDesc.ByteWidth != 160) {
+        vsBuffer->Release();
+        return;
+    }
+
+    // Staging readback
+    static ID3D11Buffer* stagingBuffer = nullptr;
+    if (!stagingBuffer) {
+        ID3D11Device* dev = nullptr;
+        pContext->GetDevice(&dev);
+        D3D11_BUFFER_DESC stageDesc = {};
+        stageDesc.ByteWidth = 160;
+        stageDesc.Usage = D3D11_USAGE_STAGING;
+        stageDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        dev->CreateBuffer(&stageDesc, nullptr, &stagingBuffer);
+        dev->Release();
+    }
+    if (!stagingBuffer) { vsBuffer->Release(); return; }
+
+    pContext->CopyResource(stagingBuffer, vsBuffer);
+    D3D11_MAPPED_SUBRESOURCE stageMap = {};
+    HRESULT hr = pContext->Map(stagingBuffer, 0, D3D11_MAP_READ, 0, &stageMap);
+    if (FAILED(hr)) { vsBuffer->Release(); return; }
+
+    std::vector<uint8_t> bufData(160);
+    memcpy(bufData.data(), stageMap.pData, 160);
+    pContext->Unmap(stagingBuffer, 0);
+
+    // Verify gWorld[0][0] == 1920 and gWorld[1][1] == 1080 before patching
+    // to avoid stomping unrelated 160-byte buffers
+    float* gWorld = reinterpret_cast<float*>(bufData.data()); // offset 0
+    if (gWorld[0] != 1920.0f || gWorld[5] != 1080.0f) {
+        vsBuffer->Release();
+        return;
+    }
+
+    // Patch the scale components
+    gWorld[0] = static_cast<float>(*InternalHorizontalRes);
+    gWorld[5] = static_cast<float>(*InternalVerticalRes);
+
+    // Write back via dynamic patch buffer
+    static ID3D11Buffer* patchBuffer = nullptr;
+    if (!patchBuffer) {
+        ID3D11Device* dev = nullptr;
+        pContext->GetDevice(&dev);
+        D3D11_BUFFER_DESC patchDesc = {};
+        patchDesc.ByteWidth = 160;
+        patchDesc.Usage = D3D11_USAGE_DYNAMIC;
+        patchDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        patchDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev->CreateBuffer(&patchDesc, nullptr, &patchBuffer);
+        dev->Release();
+    }
+    if (!patchBuffer) { vsBuffer->Release(); return; }
+
+    D3D11_MAPPED_SUBRESOURCE patchMap = {};
+    hr = pContext->Map(patchBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &patchMap);
+    if (SUCCEEDED(hr)) {
+        memcpy(patchMap.pData, bufData.data(), 160);
+        pContext->Unmap(patchBuffer, 0);
+        pContext->VSSetConstantBuffers(0, 1, &patchBuffer);
+        spdlog::info("Patched Mizuchi gWorld buffer ({}x{}).",
+            *InternalHorizontalRes, *InternalVerticalRes);
+    }
+
+    vsBuffer->Release();
+}
+
 bool vpResize(ID3D11DeviceContext* pContext)
 {
     if (PlayerSettingsRm.RES.UseCustomRes) {
@@ -382,23 +462,28 @@ bool vpResize(ID3D11DeviceContext* pContext)
                             if (rttex != nullptr) {
                                 D3D11_TEXTURE2D_DESC texdesc = {};
                                 rttex->GetDesc(&texdesc);
-                                if (texdesc.Width != vp.Width) {
+                                spdlog::info("texdesc.Width={} vp.Width={}", texdesc.Width, vp.Width);
+                                if (static_cast<float>(texdesc.Width) != vp.Width) {
                                     // Here we go!
                                     // Viewport is the easy part
                                     vp.Width = static_cast<FLOAT>(texdesc.Width);
                                     vp.Height = static_cast<FLOAT>(texdesc.Height);
+                                    spdlog::info("Attempting viewport resize from {}x{} to {}x{}", vp.Width, vp.Height, texdesc.Width, texdesc.Height);
                                     pContext->RSSetViewports(1, &vp);
                                     spdlog::info("Set viewport to size {}x{}.", vp.Width, vp.Height);
                                     //cbResize(pContext, desc, texdesc, vp); // We should run the constant buffer modification right after viewport resizing.
+                                    rttex->Release();   // release before returning
+                                    rt->Release();
+                                    rtView->Release();
                                     return true;
                                 }
+                                rttex->Release();
                             }
+                            rt->Release(); // always release rt if it was non-null
                         }
                         else { spdlog::error("Viewport Resource returned null."); }
-                        rt->Release();
                     }
                 }
-                rtView->Release();
             }
         }
     }
@@ -455,22 +540,26 @@ bool srResize(ID3D11DeviceContext* pContext)
                             if (rttex != nullptr) {
                                 D3D11_TEXTURE2D_DESC texdesc = {};
                                 rttex->GetDesc(&texdesc);
-                                if (texdesc.Width != rect.right) {
+                                spdlog::info("texdesc.Width={} rect.Right={}", texdesc.Width, rect.right);
+                                if (static_cast<float>(texdesc.Width) != rect.right) {
                                     // Here we go!
                                     // Viewport is the easy part
                                     rect.right = static_cast<LONG>(texdesc.Width);
                                     rect.bottom = static_cast<LONG>(texdesc.Height);
                                     pContext->RSSetScissorRects(1, &rect);
                                     spdlog::info("Set scissor rect to size {}x{}.", rect.right, rect.bottom);
+                                    rttex->Release();
+                                    rt->Release();
+                                    rtView->Release();
                                     return true;
                                 }
+                                rttex->Release();
                             }
+                            rt->Release(); // always release rt if it was non-null
                         }
                         else { spdlog::error("Scissor Rect Resource returned null."); }
-                        rt->Release();
                     }
                 }
-                rtView->Release();
             }
         }
     }
@@ -627,6 +716,9 @@ namespace EnigmaFix {
                     resizeRt(pDesc, (*InternalHorizontalRes / 2), (*InternalVerticalRes / 2), HorizontalPPRes, VerticalPPRes);
                     break;
                 }
+                // NOTE: ImageSpaceCompositeRLR has a $u_DeferredColorMap input which seemingly has a really strange output, and this is used during MizuchiCopyBack, AddSubsurfaceScatteringDiffuse and some other things? The first one is important, and it leads back to a 1024x1024 render target (B8G8R8A8_UNORM), done before an ExecuteCommandList and ImageSpaceShadowFilter2.
+                // If we go to the rasterizer part of this, it has a 0.5 X and 0.5 Y on the viewport, which might be fine, but more interestingly, if we look at the vertex shader for the draw call, in a constant buffer, there's a gWorld parameter which has a float4 with a 1920.00 X value on row 1, and a 1080.00 Y value on row 2.
+                // This is probably the cause for the pause menu and image transition bugs.
                 default: { break; }
                 }
             }
@@ -636,6 +728,7 @@ namespace EnigmaFix {
             // TODO: Figure out how to grab the yebismizuchi2 set of calls using the ID3DUserDefinedAnnotation system, so we can more accurately adjust these.
             // TODO: We need to find a way to get this so it can work with resolutions lower than 1920x1080 too, because it will still glitch out with resolutions lower than that.
             if (PlayerSettingsRm.RES.UseCustomRes) {
+                if (pDesc->MipLevels == 1) {
                 // if (*InternalHorizontalRes != 1920 || *InternalVerticalRes != 1080) { // Unsure if the InternalHorizontalRes > 1080 will cause a problem.
                     switch (pDesc->Format) {
                     case DXGI_FORMAT_R16G16B16A16_TYPELESS: {
@@ -669,7 +762,7 @@ namespace EnigmaFix {
                         resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes);
                         break;
                     }
-                                                   // TODO: Fix this. It's not running.
+                    // TODO: Fix this. It's not running.
                     case DXGI_FORMAT_R8G8B8A8_UNORM: { // The pause menu background effect that occurs after "yebismizuchi" tagged drawcalls.
                         spdlog::info("Found Pause Menu Background Render Target (After 'yebismizuchi'). Changing resolution from from {}x{} to {}x{}.", pDesc->Width, pDesc->Height, iW, iH);
                         resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes);
@@ -678,7 +771,7 @@ namespace EnigmaFix {
                     default: { break; }
                     }
                 }
-            // }
+            }
         }
         if (pDesc->BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL)) {
             if (PlayerSettingsRm.RS.ShadowRes != 2048) {
@@ -696,32 +789,24 @@ namespace EnigmaFix {
     }
 
     // A hook that contains the needed logic for running checks on Viewports and Scissor Rects.
-    HRESULT __stdcall RenderManager::hkDrawIndexed(ID3D11DeviceContext *pContext, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
+    HRESULT __stdcall RenderManager::hkDrawIndexed(ID3D11DeviceContext* pContext, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
     {
-        bool preDraw = false;
-
-        if ((IndexCount == 3 || IndexCount == 4) && StartIndexLocation == 0 && BaseVertexLocation == 0) { // NOTE: For some reason, some render targets have three indexes.
-            preDraw = vpResize(pContext) && srResize(pContext);
+        if ((IndexCount == 3 || IndexCount == 4) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
+            vpResize(pContext);
+            srResize(pContext);
             cbPatchYebis(pContext);
         }
-        // Checks if both the viewports and scissor rects haven't been resized, and then return oDrawIndexed. I may need to find a better way of doing this to account for one not passing.
-        if (!preDraw) {
-            return rm_Instance.oDrawIndexed(pContext, IndexCount, StartIndexLocation, BaseVertexLocation);
-        }
-        return E_FAIL; // Default Return Statement, so Intellisense stops complaining.
+        return rm_Instance.oDrawIndexed(pContext, IndexCount, StartIndexLocation, BaseVertexLocation);
     }
 
     // Another hook that contains the needed logic for running checks on Viewports and Scissor Rects.
-    HRESULT __stdcall RenderManager::hkDraw(ID3D11DeviceContext *pContext, UINT VertexCount, UINT StartVertexLocation)
+    HRESULT __stdcall RenderManager::hkDraw(ID3D11DeviceContext* pContext, UINT VertexCount, UINT StartVertexLocation)
     {
-        bool preDraw = false;
-        if ((VertexCount == 3 || VertexCount == 4) && StartVertexLocation == 0) { // NOTE: For some reason, some render targets have three vertices. Some have four.
-            preDraw = vpResize(pContext) && srResize(pContext);
+        if ((VertexCount == 3 || VertexCount == 4) && StartVertexLocation == 0) {
+            vpResize(pContext);
+            srResize(pContext);
         }
-        if (!preDraw) {
-            return rm_Instance.oDraw(pContext, VertexCount, StartVertexLocation);
-        }
-        return E_FAIL; // Default Return Statement, so Intellisense stops complaining.
+        return rm_Instance.oDraw(pContext, VertexCount, StartVertexLocation);
     }
 
     DWORD __stdcall RenderManager::InitD3D11Hook(LPVOID lpReserved) {
@@ -738,19 +823,19 @@ namespace EnigmaFix {
                     case PlayerSettings::DERQ: {
                         // Binds the function we will be using to modify the render target size for shadows and other things.
                         kiero::bind(23, reinterpret_cast<void**>(&oCreateTexture2D), reinterpret_cast<void*>(this->hkCreateTexture2D));
+                        // Binds another function we will be using for resizing viewports.
+                        kiero::bind(73, reinterpret_cast<void**>(&oDrawIndexed), reinterpret_cast<void*>(this->hkDrawIndexed));
                         // Binds the function we will be using for resizing viewports.
                         kiero::bind(74, reinterpret_cast<void**>(&oDraw), reinterpret_cast<void*>(this->hkDraw));
-                        // Binds another function we will be using for resizing viewports.
-                        kiero::bind(73, reinterpret_cast<void**>(&oDrawIndexed),reinterpret_cast<void*>(this->hkDrawIndexed));
                         break;
                     }
                     case PlayerSettings::DERQ2: {
                         // Binds the function we will be using to modify the render target size for shadows and other things.
                         kiero::bind(23, reinterpret_cast<void**>(&oCreateTexture2D), reinterpret_cast<void*>(this->hkCreateTexture2D));
-                        // Binds the function we will be using for resizing viewports.
-                        kiero::bind(74, reinterpret_cast<void**>(&oDraw), reinterpret_cast<void*>(this->hkDraw));
                         // Binds another function we will be using for resizing viewports.
                         kiero::bind(73, reinterpret_cast<void**>(&oDrawIndexed),reinterpret_cast<void*>(this->hkDrawIndexed));
+                        // Binds the function we will be using for resizing viewports.
+                        kiero::bind(74, reinterpret_cast<void**>(&oDraw), reinterpret_cast<void*>(this->hkDraw));
                         break;
                     }
                     case PlayerSettings::Varnir: {
