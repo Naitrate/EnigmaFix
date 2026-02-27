@@ -1,5 +1,5 @@
 /**
-EnigmaFix Copyright (c) 2025 Bryce Q.
+EnigmaFix Copyright (c) 2026 Bryce Q.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -403,7 +403,7 @@ namespace EnigmaFix
             }
         }
 
-        if (PlayerSettingsPDQ.RS.MotionBlur == true) {
+        if (PlayerSettingsPDQ.RS.MotionBlur) {
             if (auto motionBlurToggleFunc = Memory::PatternScan(baseModule, "42 88 ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 41 8B")) { // "Application.exe"+29CFF3: mov [rcx+r13+58],al (42 88 44 29 58)
                 spdlog::info("Post Processing: Found Motion Blur Signature at: {}", reinterpret_cast<void*>(motionBlurToggleFunc));
             }

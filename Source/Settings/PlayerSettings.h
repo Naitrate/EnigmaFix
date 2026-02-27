@@ -1,5 +1,5 @@
 /**
-EnigmaFix Copyright (c) 2025 Bryce Q.
+EnigmaFix Copyright (c) 2026 Bryce Q.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -54,7 +54,7 @@ namespace EnigmaFix {
             bool UseCustomRes         = false;
             bool UseCustomResScale    = true;
             int  CustomResScale       = 100;  // Eventually will be used for upscaling/supersampling support.
-            Util::DesktopResolution Resolution = {1920, 1080 };
+            Util::DesktopResolution Resolution = { 1920, 1080 };
             //int  HorizontalRes        = 1920; // Used for Render Target/Viewport/Scissor Region Resizing
             //int  VerticalRes          = 1080; // Used for Render Target/Viewport/Scissor Region Resizing
             float InternalAspectRatio = 16.0f / 9.0f; // Used for RenderManager to dynamically adjust the rendering aspect ratio.
@@ -115,11 +115,9 @@ namespace EnigmaFix {
         };
 
         struct InternalSettings {
-            Util::DesktopResolution InternalResolution = {1920, 1080 };
+            Util::DesktopResolution InternalResolution = { 1920, 1080 };
             float dpiScale = 100.0f;
             float dpiScaleMultiplier = 1.0f; // This is just for debugging DPI scaling.
-            //int  InternalHorizontalRes = 1920; // Used for Render Target/Viewport/Scissor Region Resizing
-            //int  InternalVerticalRes   = 1080; // Used for Render Target/Viewport/Scissor Region Resizing
         };
 
         struct ResolutionSettings RES {};

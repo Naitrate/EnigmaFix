@@ -1,5 +1,5 @@
 /**
-EnigmaFix Copyright (c) 2025 Bryce Q.
+EnigmaFix Copyright (c) 2026 Bryce Q.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -144,7 +144,7 @@ namespace EnigmaFix {
             // Render the centered text
             Text("%s %s", LocUI.Strings.enigmaFixName, LocUI.Strings.versionNumber.c_str());
             Separator();
-            Text("(C) 2025 Bryce Q.");
+            Text("(c) 2026 Bryce Q.");
             Text(LocUI.Strings.enigmaFixLicense.c_str());
             Text(LocUI.Strings.donations.c_str());
             Separator();
