@@ -719,6 +719,8 @@ namespace EnigmaFix {
                 // NOTE: ImageSpaceCompositeRLR has a $u_DeferredColorMap input which seemingly has a really strange output, and this is used during MizuchiCopyBack, AddSubsurfaceScatteringDiffuse and some other things? The first one is important, and it leads back to a 1024x1024 render target (B8G8R8A8_UNORM), done before an ExecuteCommandList and ImageSpaceShadowFilter2.
                 // If we go to the rasterizer part of this, it has a 0.5 X and 0.5 Y on the viewport, which might be fine, but more interestingly, if we look at the vertex shader for the draw call, in a constant buffer, there's a gWorld parameter which has a float4 with a 1920.00 X value on row 1, and a 1080.00 Y value on row 2.
                 // This is probably the cause for the pause menu and image transition bugs.
+                
+                // Another thing is that the call after that one now has a proper render target size, but the viewport hasn't changed from 1920x1080 for some reason.
                 default: { break; }
                 }
             }
