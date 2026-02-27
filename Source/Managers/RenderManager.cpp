@@ -209,7 +209,7 @@ bool cbResize(ID3D11DeviceContext* pContext, D3D11_RENDER_TARGET_VIEW_DESC pDesc
 void cbPatchYebis(ID3D11DeviceContext* pContext)
 {
     if (!PlayerSettingsRm.RES.UseCustomRes) return;
-    if (*InternalHorizontalRes != 1920 || *InternalVerticalRes != 1080) return; // Only needed when the resolution isn't 1920x1080
+    if (*InternalHorizontalRes == 1920 && *InternalVerticalRes == 1080) return; // Only needed when the resolution isn't 1920x1080
 
     // --- 1. Get the VS constant buffer at slot 0 ---
     ID3D11Buffer* vsBuffer = nullptr;
@@ -791,7 +791,8 @@ namespace EnigmaFix {
     // A hook that contains the needed logic for running checks on Viewports and Scissor Rects.
     HRESULT __stdcall RenderManager::hkDrawIndexed(ID3D11DeviceContext* pContext, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
     {
-        if ((IndexCount == 3 || IndexCount == 4) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
+        //if ((IndexCount == 3 || IndexCount == 4 || IndexCount == 6) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
+        if ((IndexCount == 3 || IndexCount == 4 || IndexCount == 6) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
             vpResize(pContext);
             srResize(pContext);
             cbPatchYebis(pContext);
