@@ -197,8 +197,8 @@ endif()
 
 ## Add the dependencies we set up previously.
 # NOTE: Add "" to the "add_dependencies" section when you finally get that shit working.
-add_dependencies(EnigmaFix imgui kiero safetyhook inipp nlohmann_json spdlog)
-target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog)
+add_dependencies(EnigmaFix imgui kiero safetyhook inipp nlohmann_json spdlog minhook)
+target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog minhook)
 #target_link_libraries(EnigmaFix d3dcompiler imgui kiero inipp ${Boost_LIBRARIES})
 ## Set up our linker flags for compiling.
 if(MINGW)
