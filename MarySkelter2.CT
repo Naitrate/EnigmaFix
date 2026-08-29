@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<CheatTable CheatEngineTableVersion="45">
+<CheatTable CheatEngineTableVersion="52">
   <CheatEntries>
     <CheatEntry>
       <ID>194</ID>
@@ -557,6 +557,1076 @@ mov eax,[rdi+00000470]
           <Options moManualExpandCollapse="1"/>
           <GroupHeader>1</GroupHeader>
           <CheatEntries>
+            <CheatEntry>
+              <ID>285</ID>
+              <Description>"Patch nearZ Plane"</Description>
+              <VariableType>Auto Assembler Script</VariableType>
+              <AssemblerScript>{ Mary Skelter 2 - near-clip plane override
+
+  WHY:
+  The camera's near-clip plane is set once at camera init to the engine's
+  shared 1.0f constant (DAT_7ff6a3ccf588). At 16:9 the near plane's half-width
+  is  near * tan(fov/2) * aspect , so at FOV 150 it is ~13 units across and
+  slices open any geometry beside you - the pink/white "shards" bug.
+
+  You cannot edit the 1.0f constant itself: it is the generic 1.0 used all over
+  the binary. So we hook the setter instead.
+
+  WHAT:
+  MarySkelter2.exe+BD72B  is  movss [rcx+468],xmm0  inside the near-clip setter
+  (one caller: the camera initialiser). We replace XMM0 with our own value.
+  +0x468 is the authoritative source - the engine copies it into the camera's
+  _nearZ (+0x288) every frame.
+
+  TUNING:
+  After enabling, add "ms2_nearz" as a Float entry in your cheat table to
+  change the near plane live. 0.05 is a good default. Lower widens your usable
+  FOV further; below ~0.02 you start risking z-fighting on distant geometry
+  (far plane is 2048).
+
+  NOTE:
+  The setter only runs when the camera initialises, so the ASM hook alone takes
+  effect on the next room/floor/battle transition. The {$lua} //block below also
+  //writes the value straight into the live camera so it applies immediately.
+//}
+
+[ENABLE]
+
+globalalloc(ms2_nearz,4)
+alloc(newmem,256,MarySkelter2.exe+BD72B)
+label(return)
+
+ms2_nearz:
+  dd (float)0.05
+
+newmem:
+  movss xmm0,[ms2_nearz]
+  movss [rcx+00000468],xmm0
+  jmp return
+
+MarySkelter2.exe+BD72B:
+  jmp newmem
+  nop 3
+return:
+
+{$lua}
+if syntaxcheck then return end
+-- apply to the already-running camera as well, so you see it without
+-- having to change rooms:  [[MarySkelter2.exe+A6CEB0]+40]+468
+local ok, err = pcall(function()
+  local a   = readPointer(getAddress("MarySkelter2.exe") + 0xA6CEB0)
+  local cam = a and a ~= 0 and readPointer(a + 0x40) or nil
+  if cam and cam ~= 0 then
+    writeFloat(cam + 0x468, readFloat(getAddress("ms2_nearz")))
+  end
+end)
+if not ok then print("ms2 nearclip: live apply skipped ("..tostring(err)..")") end
+{$asm}
+
+
+[DISABLE]
+
+MarySkelter2.exe+BD72B:
+  db F3 0F 11 81 68 04 00 00
+
+{$lua}
+if syntaxcheck then return end
+pcall(function()
+  local a   = readPointer(getAddress("MarySkelter2.exe") + 0xA6CEB0)
+  local cam = a and a ~= 0 and readPointer(a + 0x40) or nil
+  if cam and cam ~= 0 then writeFloat(cam + 0x468, 1.0) end   -- stock value
+end)
+{$asm}
+
+unregistersymbol(ms2_nearz)
+dealloc(newmem)
+
+{
+// ORIGINAL CODE - INJECTION POINT: MarySkelter2.exe+BD72B
+
+MarySkelter2.exe+BD720: 48 8B 05 89 F7 9A 00  -  mov rax,[MarySkelter2.exe+A6CEB0]
+MarySkelter2.exe+BD727: 48 8B 48 40           -  mov rcx,[rax+40]
+MarySkelter2.exe+BD72B: F3 0F 11 81 68 04 00 00  -  movss [rcx+00000468],xmm0
+MarySkelter2.exe+BD733: C3                    -  ret
+}
+</AssemblerScript>
+            </CheatEntry>
+            <CheatEntry>
+              <ID>284</ID>
+              <Description>"Widen Dungeon Visibility Cone"</Description>
+              <VariableType>Auto Assembler Script</VariableType>
+              <AssemblerScript>{ Mary Skelter 2 - widen dungeon tile visibility cone
+  Enables all 240 entries of the visibility offset table for every
+  facing direction. Removes the fixed 126.9-degree horizontal cull
+  cone that leaves green voids at the screen edges above ~96 FOV.
+  Table: 240 x {flags:dd, dx:dd, dz:dd} //at MarySkelter2.exe+712E00 }
+
+[ENABLE]
+MarySkelter2.exe+712E00:
+  dd 000000FF
+MarySkelter2.exe+712E0C:
+  dd 000000FF
+MarySkelter2.exe+712E18:
+  dd 000000FF
+MarySkelter2.exe+712E24:
+  dd 000000FF
+MarySkelter2.exe+712E30:
+  dd 000000FF
+MarySkelter2.exe+712E3C:
+  dd 000000FF
+MarySkelter2.exe+712E48:
+  dd 000000FF
+MarySkelter2.exe+712E54:
+  dd 000000FF
+MarySkelter2.exe+712E60:
+  dd 000000FF
+MarySkelter2.exe+712E6C:
+  dd 000000FF
+MarySkelter2.exe+712E78:
+  dd 000000FF
+MarySkelter2.exe+712E84:
+  dd 000000FF
+MarySkelter2.exe+712E90:
+  dd 000000FF
+MarySkelter2.exe+712E9C:
+  dd 000000FF
+MarySkelter2.exe+712EA8:
+  dd 000000FF
+MarySkelter2.exe+712EB4:
+  dd 000000FF
+MarySkelter2.exe+712EC0:
+  dd 000000FF
+MarySkelter2.exe+712ECC:
+  dd 000000FF
+MarySkelter2.exe+712ED8:
+  dd 000000FF
+MarySkelter2.exe+712EE4:
+  dd 000000FF
+MarySkelter2.exe+712EF0:
+  dd 000000FF
+MarySkelter2.exe+712EFC:
+  dd 000000FF
+MarySkelter2.exe+712F08:
+  dd 000000FF
+MarySkelter2.exe+712F14:
+  dd 000000FF
+MarySkelter2.exe+712F20:
+  dd 000000FF
+MarySkelter2.exe+712F2C:
+  dd 000000FF
+MarySkelter2.exe+712F38:
+  dd 000000FF
+MarySkelter2.exe+712F44:
+  dd 000000FF
+MarySkelter2.exe+712F50:
+  dd 000000FF
+MarySkelter2.exe+712F5C:
+  dd 000000FF
+MarySkelter2.exe+712F68:
+  dd 000000FF
+MarySkelter2.exe+712F74:
+  dd 000000FF
+MarySkelter2.exe+712F80:
+  dd 000000FF
+MarySkelter2.exe+712F8C:
+  dd 000000FF
+MarySkelter2.exe+712F98:
+  dd 000000FF
+MarySkelter2.exe+712FA4:
+  dd 000000FF
+MarySkelter2.exe+712FB0:
+  dd 000000FF
+MarySkelter2.exe+712FBC:
+  dd 000000FF
+MarySkelter2.exe+712FC8:
+  dd 000000FF
+MarySkelter2.exe+712FD4:
+  dd 000000FF
+MarySkelter2.exe+712FE0:
+  dd 000000FF
+MarySkelter2.exe+712FEC:
+  dd 000000FF
+MarySkelter2.exe+712FF8:
+  dd 000000FF
+MarySkelter2.exe+713004:
+  dd 000000FF
+MarySkelter2.exe+713010:
+  dd 000000FF
+MarySkelter2.exe+71301C:
+  dd 000000FF
+MarySkelter2.exe+713028:
+  dd 000000FF
+MarySkelter2.exe+713034:
+  dd 000000FF
+MarySkelter2.exe+713040:
+  dd 000000FF
+MarySkelter2.exe+71304C:
+  dd 000000FF
+MarySkelter2.exe+713058:
+  dd 000000FF
+MarySkelter2.exe+713064:
+  dd 000000FF
+MarySkelter2.exe+713070:
+  dd 000000FF
+MarySkelter2.exe+71307C:
+  dd 000000FF
+MarySkelter2.exe+713088:
+  dd 000000FF
+MarySkelter2.exe+713094:
+  dd 000000FF
+MarySkelter2.exe+7130A0:
+  dd 000000FF
+MarySkelter2.exe+7130AC:
+  dd 000000FF
+MarySkelter2.exe+7130B8:
+  dd 000000FF
+MarySkelter2.exe+7130C4:
+  dd 000000FF
+MarySkelter2.exe+7130D0:
+  dd 000000FF
+MarySkelter2.exe+7130DC:
+  dd 000000FF
+MarySkelter2.exe+7130E8:
+  dd 000000FF
+MarySkelter2.exe+7130F4:
+  dd 000000FF
+MarySkelter2.exe+713100:
+  dd 000000FF
+MarySkelter2.exe+71310C:
+  dd 000000FF
+MarySkelter2.exe+713118:
+  dd 000000FF
+MarySkelter2.exe+713124:
+  dd 000000FF
+MarySkelter2.exe+713130:
+  dd 000000FF
+MarySkelter2.exe+71313C:
+  dd 000000FF
+MarySkelter2.exe+713148:
+  dd 000000FF
+MarySkelter2.exe+713154:
+  dd 000000FF
+MarySkelter2.exe+713160:
+  dd 000000FF
+MarySkelter2.exe+71316C:
+  dd 000000FF
+MarySkelter2.exe+713178:
+  dd 000000FF
+MarySkelter2.exe+713184:
+  dd 000000FF
+MarySkelter2.exe+713190:
+  dd 000000FF
+MarySkelter2.exe+71319C:
+  dd 000000FF
+MarySkelter2.exe+7131A8:
+  dd 000000FF
+MarySkelter2.exe+7131B4:
+  dd 000000FF
+MarySkelter2.exe+7131C0:
+  dd 000000FF
+MarySkelter2.exe+7131CC:
+  dd 000000FF
+MarySkelter2.exe+7131D8:
+  dd 000000FF
+MarySkelter2.exe+7131E4:
+  dd 000000FF
+MarySkelter2.exe+7131F0:
+  dd 000000FF
+MarySkelter2.exe+7131FC:
+  dd 000000FF
+MarySkelter2.exe+713208:
+  dd 000000FF
+MarySkelter2.exe+713214:
+  dd 000000FF
+MarySkelter2.exe+713220:
+  dd 000000FF
+MarySkelter2.exe+71322C:
+  dd 000000FF
+MarySkelter2.exe+713238:
+  dd 000000FF
+MarySkelter2.exe+713244:
+  dd 000000FF
+MarySkelter2.exe+713250:
+  dd 000000FF
+MarySkelter2.exe+71325C:
+  dd 000000FF
+MarySkelter2.exe+713268:
+  dd 000000FF
+MarySkelter2.exe+713274:
+  dd 000000FF
+MarySkelter2.exe+713280:
+  dd 000000FF
+MarySkelter2.exe+71328C:
+  dd 000000FF
+MarySkelter2.exe+713298:
+  dd 000000FF
+MarySkelter2.exe+7132A4:
+  dd 000000FF
+MarySkelter2.exe+7132B0:
+  dd 000000FF
+MarySkelter2.exe+7132BC:
+  dd 000000FF
+MarySkelter2.exe+7132C8:
+  dd 000000FF
+MarySkelter2.exe+7132D4:
+  dd 000000FF
+MarySkelter2.exe+7132E0:
+  dd 000000FF
+MarySkelter2.exe+7132EC:
+  dd 000000FF
+MarySkelter2.exe+7132F8:
+  dd 000000FF
+MarySkelter2.exe+713304:
+  dd 000000FF
+MarySkelter2.exe+713310:
+  dd 000000FF
+MarySkelter2.exe+71331C:
+  dd 000000FF
+MarySkelter2.exe+713328:
+  dd 000000FF
+MarySkelter2.exe+713334:
+  dd 000000FF
+MarySkelter2.exe+713340:
+  dd 000000FF
+MarySkelter2.exe+71334C:
+  dd 000000FF
+MarySkelter2.exe+713358:
+  dd 000000FF
+MarySkelter2.exe+713364:
+  dd 000000FF
+MarySkelter2.exe+713370:
+  dd 000000FF
+MarySkelter2.exe+71337C:
+  dd 000000FF
+MarySkelter2.exe+713388:
+  dd 000000FF
+MarySkelter2.exe+713394:
+  dd 000000FF
+MarySkelter2.exe+7133A0:
+  dd 000000FF
+MarySkelter2.exe+7133AC:
+  dd 000000FF
+MarySkelter2.exe+7133B8:
+  dd 000000FF
+MarySkelter2.exe+7133C4:
+  dd 000000FF
+MarySkelter2.exe+7133D0:
+  dd 000000FF
+MarySkelter2.exe+7133DC:
+  dd 000000FF
+MarySkelter2.exe+7133E8:
+  dd 000000FF
+MarySkelter2.exe+7133F4:
+  dd 000000FF
+MarySkelter2.exe+713400:
+  dd 000000FF
+MarySkelter2.exe+71340C:
+  dd 000000FF
+MarySkelter2.exe+713418:
+  dd 000000FF
+MarySkelter2.exe+713424:
+  dd 000000FF
+MarySkelter2.exe+713430:
+  dd 000000FF
+MarySkelter2.exe+71343C:
+  dd 000000FF
+MarySkelter2.exe+713448:
+  dd 000000FF
+MarySkelter2.exe+713454:
+  dd 000000FF
+MarySkelter2.exe+713460:
+  dd 000000FF
+MarySkelter2.exe+71346C:
+  dd 000000FF
+MarySkelter2.exe+713478:
+  dd 000000FF
+MarySkelter2.exe+713484:
+  dd 000000FF
+MarySkelter2.exe+713490:
+  dd 000000FF
+MarySkelter2.exe+71349C:
+  dd 000000FF
+MarySkelter2.exe+7134A8:
+  dd 000000FF
+MarySkelter2.exe+7134B4:
+  dd 000000FF
+MarySkelter2.exe+7134C0:
+  dd 000000FF
+MarySkelter2.exe+7134CC:
+  dd 000000FF
+MarySkelter2.exe+7134D8:
+  dd 000000FF
+MarySkelter2.exe+7134E4:
+  dd 000000FF
+MarySkelter2.exe+7134F0:
+  dd 000000FF
+MarySkelter2.exe+7134FC:
+  dd 000000FF
+MarySkelter2.exe+713508:
+  dd 000000FF
+MarySkelter2.exe+713514:
+  dd 000000FF
+MarySkelter2.exe+713520:
+  dd 000000FF
+MarySkelter2.exe+71352C:
+  dd 000000FF
+MarySkelter2.exe+713538:
+  dd 000000FF
+MarySkelter2.exe+713544:
+  dd 000000FF
+MarySkelter2.exe+713550:
+  dd 000000FF
+MarySkelter2.exe+71355C:
+  dd 000000FF
+MarySkelter2.exe+713568:
+  dd 000000FF
+MarySkelter2.exe+713574:
+  dd 000000FF
+MarySkelter2.exe+713580:
+  dd 000000FF
+MarySkelter2.exe+71358C:
+  dd 000000FF
+MarySkelter2.exe+713598:
+  dd 000000FF
+MarySkelter2.exe+7135A4:
+  dd 000000FF
+MarySkelter2.exe+7135B0:
+  dd 000000FF
+MarySkelter2.exe+7135BC:
+  dd 000000FF
+MarySkelter2.exe+7135C8:
+  dd 000000FF
+MarySkelter2.exe+7135D4:
+  dd 000000FF
+MarySkelter2.exe+7135E0:
+  dd 000000FF
+MarySkelter2.exe+7135EC:
+  dd 000000FF
+MarySkelter2.exe+7135F8:
+  dd 000000FF
+MarySkelter2.exe+713604:
+  dd 000000FF
+MarySkelter2.exe+713610:
+  dd 000000FF
+MarySkelter2.exe+71361C:
+  dd 000000FF
+MarySkelter2.exe+713628:
+  dd 000000FF
+MarySkelter2.exe+713634:
+  dd 000000FF
+MarySkelter2.exe+713640:
+  dd 000000FF
+MarySkelter2.exe+71364C:
+  dd 000000FF
+MarySkelter2.exe+713658:
+  dd 000000FF
+MarySkelter2.exe+713664:
+  dd 000000FF
+MarySkelter2.exe+713670:
+  dd 000000FF
+MarySkelter2.exe+71367C:
+  dd 000000FF
+MarySkelter2.exe+713688:
+  dd 000000FF
+MarySkelter2.exe+713694:
+  dd 000000FF
+MarySkelter2.exe+7136A0:
+  dd 000000FF
+MarySkelter2.exe+7136AC:
+  dd 000000FF
+MarySkelter2.exe+7136B8:
+  dd 000000FF
+MarySkelter2.exe+7136C4:
+  dd 000000FF
+MarySkelter2.exe+7136D0:
+  dd 000000FF
+MarySkelter2.exe+7136DC:
+  dd 000000FF
+MarySkelter2.exe+7136E8:
+  dd 000000FF
+MarySkelter2.exe+7136F4:
+  dd 000000FF
+MarySkelter2.exe+713700:
+  dd 000000FF
+MarySkelter2.exe+71370C:
+  dd 000000FF
+MarySkelter2.exe+713718:
+  dd 000000FF
+MarySkelter2.exe+713724:
+  dd 000000FF
+MarySkelter2.exe+713730:
+  dd 000000FF
+MarySkelter2.exe+71373C:
+  dd 000000FF
+MarySkelter2.exe+713748:
+  dd 000000FF
+MarySkelter2.exe+713754:
+  dd 000000FF
+MarySkelter2.exe+713760:
+  dd 000000FF
+MarySkelter2.exe+71376C:
+  dd 000000FF
+MarySkelter2.exe+713778:
+  dd 000000FF
+MarySkelter2.exe+713784:
+  dd 000000FF
+MarySkelter2.exe+713790:
+  dd 000000FF
+MarySkelter2.exe+71379C:
+  dd 000000FF
+MarySkelter2.exe+7137A8:
+  dd 000000FF
+MarySkelter2.exe+7137B4:
+  dd 000000FF
+MarySkelter2.exe+7137C0:
+  dd 000000FF
+MarySkelter2.exe+7137CC:
+  dd 000000FF
+MarySkelter2.exe+7137D8:
+  dd 000000FF
+MarySkelter2.exe+7137E4:
+  dd 000000FF
+MarySkelter2.exe+7137F0:
+  dd 000000FF
+MarySkelter2.exe+7137FC:
+  dd 000000FF
+MarySkelter2.exe+713808:
+  dd 000000FF
+MarySkelter2.exe+713814:
+  dd 000000FF
+MarySkelter2.exe+713820:
+  dd 000000FF
+MarySkelter2.exe+71382C:
+  dd 000000FF
+MarySkelter2.exe+713838:
+  dd 000000FF
+MarySkelter2.exe+713844:
+  dd 000000FF
+MarySkelter2.exe+713850:
+  dd 000000FF
+MarySkelter2.exe+71385C:
+  dd 000000FF
+MarySkelter2.exe+713868:
+  dd 000000FF
+MarySkelter2.exe+713874:
+  dd 000000FF
+MarySkelter2.exe+713880:
+  dd 000000FF
+MarySkelter2.exe+71388C:
+  dd 000000FF
+MarySkelter2.exe+713898:
+  dd 000000FF
+MarySkelter2.exe+7138A4:
+  dd 000000FF
+MarySkelter2.exe+7138B0:
+  dd 000000FF
+MarySkelter2.exe+7138BC:
+  dd 000000FF
+MarySkelter2.exe+7138C8:
+  dd 000000FF
+MarySkelter2.exe+7138D4:
+  dd 000000FF
+MarySkelter2.exe+7138E0:
+  dd 000000FF
+MarySkelter2.exe+7138EC:
+  dd 000000FF
+MarySkelter2.exe+7138F8:
+  dd 000000FF
+MarySkelter2.exe+713904:
+  dd 000000FF
+MarySkelter2.exe+713910:
+  dd 000000FF
+MarySkelter2.exe+71391C:
+  dd 000000FF
+MarySkelter2.exe+713928:
+  dd 000000FF
+MarySkelter2.exe+713934:
+  dd 000000FF
+
+[DISABLE]
+MarySkelter2.exe+712E00:
+  dd 000000F9
+MarySkelter2.exe+712E0C:
+  dd 000000F3
+MarySkelter2.exe+712E18:
+  dd 000000F6
+MarySkelter2.exe+712E24:
+  dd 000000FC
+MarySkelter2.exe+712E30:
+  dd 000000F1
+MarySkelter2.exe+712E3C:
+  dd 000000F1
+MarySkelter2.exe+712E48:
+  dd 000000F2
+MarySkelter2.exe+712E54:
+  dd 000000F2
+MarySkelter2.exe+712E60:
+  dd 000000F4
+MarySkelter2.exe+712E6C:
+  dd 000000F4
+MarySkelter2.exe+712E78:
+  dd 000000F8
+MarySkelter2.exe+712E84:
+  dd 000000F8
+MarySkelter2.exe+712E90:
+  dd 000000F1
+MarySkelter2.exe+712E9C:
+  dd 000000F1
+MarySkelter2.exe+712EA8:
+  dd 000000F2
+MarySkelter2.exe+712EB4:
+  dd 000000F2
+MarySkelter2.exe+712EC0:
+  dd 000000F4
+MarySkelter2.exe+712ECC:
+  dd 000000F4
+MarySkelter2.exe+712ED8:
+  dd 000000F8
+MarySkelter2.exe+712EE4:
+  dd 000000F8
+MarySkelter2.exe+712EF0:
+  dd 000000F1
+MarySkelter2.exe+712EFC:
+  dd 000000F1
+MarySkelter2.exe+712F08:
+  dd 000000F2
+MarySkelter2.exe+712F14:
+  dd 000000F2
+MarySkelter2.exe+712F20:
+  dd 000000F4
+MarySkelter2.exe+712F2C:
+  dd 000000F4
+MarySkelter2.exe+712F38:
+  dd 000000F8
+MarySkelter2.exe+712F44:
+  dd 000000F8
+MarySkelter2.exe+712F50:
+  dd 000000F1
+MarySkelter2.exe+712F5C:
+  dd 000000F1
+MarySkelter2.exe+712F68:
+  dd 000000F2
+MarySkelter2.exe+712F74:
+  dd 000000F2
+MarySkelter2.exe+712F80:
+  dd 000000F4
+MarySkelter2.exe+712F8C:
+  dd 000000F4
+MarySkelter2.exe+712F98:
+  dd 000000F8
+MarySkelter2.exe+712FA4:
+  dd 000000F8
+MarySkelter2.exe+712FB0:
+  dd 000000F1
+MarySkelter2.exe+712FBC:
+  dd 000000F1
+MarySkelter2.exe+712FC8:
+  dd 000000F2
+MarySkelter2.exe+712FD4:
+  dd 000000F2
+MarySkelter2.exe+712FE0:
+  dd 000000F4
+MarySkelter2.exe+712FEC:
+  dd 000000F4
+MarySkelter2.exe+712FF8:
+  dd 000000F8
+MarySkelter2.exe+713004:
+  dd 000000F8
+MarySkelter2.exe+713010:
+  dd 000000F1
+MarySkelter2.exe+71301C:
+  dd 000000F1
+MarySkelter2.exe+713028:
+  dd 000000F2
+MarySkelter2.exe+713034:
+  dd 000000F2
+MarySkelter2.exe+713040:
+  dd 000000F4
+MarySkelter2.exe+71304C:
+  dd 000000F4
+MarySkelter2.exe+713058:
+  dd 000000F8
+MarySkelter2.exe+713064:
+  dd 000000F8
+MarySkelter2.exe+713070:
+  dd 000000F1
+MarySkelter2.exe+71307C:
+  dd 000000F2
+MarySkelter2.exe+713088:
+  dd 000000F4
+MarySkelter2.exe+713094:
+  dd 000000F8
+MarySkelter2.exe+7130A0:
+  dd 000000F9
+MarySkelter2.exe+7130AC:
+  dd 000000F3
+MarySkelter2.exe+7130B8:
+  dd 000000F6
+MarySkelter2.exe+7130C4:
+  dd 000000FC
+MarySkelter2.exe+7130D0:
+  dd 000000F1
+MarySkelter2.exe+7130DC:
+  dd 000000F1
+MarySkelter2.exe+7130E8:
+  dd 000000F2
+MarySkelter2.exe+7130F4:
+  dd 000000F2
+MarySkelter2.exe+713100:
+  dd 000000F4
+MarySkelter2.exe+71310C:
+  dd 000000F4
+MarySkelter2.exe+713118:
+  dd 000000F8
+MarySkelter2.exe+713124:
+  dd 000000F8
+MarySkelter2.exe+713130:
+  dd 000000F1
+MarySkelter2.exe+71313C:
+  dd 000000F1
+MarySkelter2.exe+713148:
+  dd 000000F2
+MarySkelter2.exe+713154:
+  dd 000000F2
+MarySkelter2.exe+713160:
+  dd 000000F4
+MarySkelter2.exe+71316C:
+  dd 000000F4
+MarySkelter2.exe+713178:
+  dd 000000F8
+MarySkelter2.exe+713184:
+  dd 000000F8
+MarySkelter2.exe+713190:
+  dd 000000F1
+MarySkelter2.exe+71319C:
+  dd 000000F1
+MarySkelter2.exe+7131A8:
+  dd 000000F2
+MarySkelter2.exe+7131B4:
+  dd 000000F2
+MarySkelter2.exe+7131C0:
+  dd 000000F4
+MarySkelter2.exe+7131CC:
+  dd 000000F4
+MarySkelter2.exe+7131D8:
+  dd 000000F8
+MarySkelter2.exe+7131E4:
+  dd 000000F8
+MarySkelter2.exe+7131F0:
+  dd 000000F1
+MarySkelter2.exe+7131FC:
+  dd 000000F1
+MarySkelter2.exe+713208:
+  dd 000000F2
+MarySkelter2.exe+713214:
+  dd 000000F2
+MarySkelter2.exe+713220:
+  dd 000000F4
+MarySkelter2.exe+71322C:
+  dd 000000F4
+MarySkelter2.exe+713238:
+  dd 000000F8
+MarySkelter2.exe+713244:
+  dd 000000F8
+MarySkelter2.exe+713250:
+  dd 000000F1
+MarySkelter2.exe+71325C:
+  dd 000000F1
+MarySkelter2.exe+713268:
+  dd 000000F2
+MarySkelter2.exe+713274:
+  dd 000000F2
+MarySkelter2.exe+713280:
+  dd 000000F4
+MarySkelter2.exe+71328C:
+  dd 000000F4
+MarySkelter2.exe+713298:
+  dd 000000F8
+MarySkelter2.exe+7132A4:
+  dd 000000F8
+MarySkelter2.exe+7132B0:
+  dd 000000F1
+MarySkelter2.exe+7132BC:
+  dd 000000F2
+MarySkelter2.exe+7132C8:
+  dd 000000F4
+MarySkelter2.exe+7132D4:
+  dd 000000F8
+MarySkelter2.exe+7132E0:
+  dd 000000F9
+MarySkelter2.exe+7132EC:
+  dd 000000F3
+MarySkelter2.exe+7132F8:
+  dd 000000F6
+MarySkelter2.exe+713304:
+  dd 000000FC
+MarySkelter2.exe+713310:
+  dd 000000F1
+MarySkelter2.exe+71331C:
+  dd 000000F1
+MarySkelter2.exe+713328:
+  dd 000000F2
+MarySkelter2.exe+713334:
+  dd 000000F2
+MarySkelter2.exe+713340:
+  dd 000000F4
+MarySkelter2.exe+71334C:
+  dd 000000F4
+MarySkelter2.exe+713358:
+  dd 000000F8
+MarySkelter2.exe+713364:
+  dd 000000F8
+MarySkelter2.exe+713370:
+  dd 000000F1
+MarySkelter2.exe+71337C:
+  dd 000000F1
+MarySkelter2.exe+713388:
+  dd 000000F2
+MarySkelter2.exe+713394:
+  dd 000000F2
+MarySkelter2.exe+7133A0:
+  dd 000000F4
+MarySkelter2.exe+7133AC:
+  dd 000000F4
+MarySkelter2.exe+7133B8:
+  dd 000000F8
+MarySkelter2.exe+7133C4:
+  dd 000000F8
+MarySkelter2.exe+7133D0:
+  dd 000000F1
+MarySkelter2.exe+7133DC:
+  dd 000000F1
+MarySkelter2.exe+7133E8:
+  dd 000000F2
+MarySkelter2.exe+7133F4:
+  dd 000000F2
+MarySkelter2.exe+713400:
+  dd 000000F4
+MarySkelter2.exe+71340C:
+  dd 000000F4
+MarySkelter2.exe+713418:
+  dd 000000F8
+MarySkelter2.exe+713424:
+  dd 000000F8
+MarySkelter2.exe+713430:
+  dd 000000F1
+MarySkelter2.exe+71343C:
+  dd 000000F1
+MarySkelter2.exe+713448:
+  dd 000000F2
+MarySkelter2.exe+713454:
+  dd 000000F2
+MarySkelter2.exe+713460:
+  dd 000000F4
+MarySkelter2.exe+71346C:
+  dd 000000F4
+MarySkelter2.exe+713478:
+  dd 000000F8
+MarySkelter2.exe+713484:
+  dd 000000F8
+MarySkelter2.exe+713490:
+  dd 000000F1
+MarySkelter2.exe+71349C:
+  dd 000000F2
+MarySkelter2.exe+7134A8:
+  dd 000000F4
+MarySkelter2.exe+7134B4:
+  dd 000000F8
+MarySkelter2.exe+7134C0:
+  dd 000000F9
+MarySkelter2.exe+7134CC:
+  dd 000000F3
+MarySkelter2.exe+7134D8:
+  dd 000000F6
+MarySkelter2.exe+7134E4:
+  dd 000000FC
+MarySkelter2.exe+7134F0:
+  dd 000000F1
+MarySkelter2.exe+7134FC:
+  dd 000000F1
+MarySkelter2.exe+713508:
+  dd 000000F2
+MarySkelter2.exe+713514:
+  dd 000000F2
+MarySkelter2.exe+713520:
+  dd 000000F4
+MarySkelter2.exe+71352C:
+  dd 000000F4
+MarySkelter2.exe+713538:
+  dd 000000F8
+MarySkelter2.exe+713544:
+  dd 000000F8
+MarySkelter2.exe+713550:
+  dd 000000F1
+MarySkelter2.exe+71355C:
+  dd 000000F1
+MarySkelter2.exe+713568:
+  dd 000000F2
+MarySkelter2.exe+713574:
+  dd 000000F2
+MarySkelter2.exe+713580:
+  dd 000000F4
+MarySkelter2.exe+71358C:
+  dd 000000F4
+MarySkelter2.exe+713598:
+  dd 000000F8
+MarySkelter2.exe+7135A4:
+  dd 000000F8
+MarySkelter2.exe+7135B0:
+  dd 000000F1
+MarySkelter2.exe+7135BC:
+  dd 000000F1
+MarySkelter2.exe+7135C8:
+  dd 000000F2
+MarySkelter2.exe+7135D4:
+  dd 000000F2
+MarySkelter2.exe+7135E0:
+  dd 000000F4
+MarySkelter2.exe+7135EC:
+  dd 000000F4
+MarySkelter2.exe+7135F8:
+  dd 000000F8
+MarySkelter2.exe+713604:
+  dd 000000F8
+MarySkelter2.exe+713610:
+  dd 000000F1
+MarySkelter2.exe+71361C:
+  dd 000000F2
+MarySkelter2.exe+713628:
+  dd 000000F4
+MarySkelter2.exe+713634:
+  dd 000000F8
+MarySkelter2.exe+713640:
+  dd 000000F9
+MarySkelter2.exe+71364C:
+  dd 000000F3
+MarySkelter2.exe+713658:
+  dd 000000F6
+MarySkelter2.exe+713664:
+  dd 000000FC
+MarySkelter2.exe+713670:
+  dd 000000F1
+MarySkelter2.exe+71367C:
+  dd 000000F1
+MarySkelter2.exe+713688:
+  dd 000000F2
+MarySkelter2.exe+713694:
+  dd 000000F2
+MarySkelter2.exe+7136A0:
+  dd 000000F4
+MarySkelter2.exe+7136AC:
+  dd 000000F4
+MarySkelter2.exe+7136B8:
+  dd 000000F8
+MarySkelter2.exe+7136C4:
+  dd 000000F8
+MarySkelter2.exe+7136D0:
+  dd 000000F1
+MarySkelter2.exe+7136DC:
+  dd 000000F1
+MarySkelter2.exe+7136E8:
+  dd 000000F2
+MarySkelter2.exe+7136F4:
+  dd 000000F2
+MarySkelter2.exe+713700:
+  dd 000000F4
+MarySkelter2.exe+71370C:
+  dd 000000F4
+MarySkelter2.exe+713718:
+  dd 000000F8
+MarySkelter2.exe+713724:
+  dd 000000F8
+MarySkelter2.exe+713730:
+  dd 000000F1
+MarySkelter2.exe+71373C:
+  dd 000000F2
+MarySkelter2.exe+713748:
+  dd 000000F4
+MarySkelter2.exe+713754:
+  dd 000000F8
+MarySkelter2.exe+713760:
+  dd 000000F1
+MarySkelter2.exe+71376C:
+  dd 000000F1
+MarySkelter2.exe+713778:
+  dd 000000F2
+MarySkelter2.exe+713784:
+  dd 000000F2
+MarySkelter2.exe+713790:
+  dd 000000F4
+MarySkelter2.exe+71379C:
+  dd 000000F4
+MarySkelter2.exe+7137A8:
+  dd 000000F8
+MarySkelter2.exe+7137B4:
+  dd 000000F8
+MarySkelter2.exe+7137C0:
+  dd 000000F9
+MarySkelter2.exe+7137CC:
+  dd 000000F3
+MarySkelter2.exe+7137D8:
+  dd 000000F6
+MarySkelter2.exe+7137E4:
+  dd 000000FC
+MarySkelter2.exe+7137F0:
+  dd 000000F1
+MarySkelter2.exe+7137FC:
+  dd 000000F1
+MarySkelter2.exe+713808:
+  dd 000000F2
+MarySkelter2.exe+713814:
+  dd 000000F2
+MarySkelter2.exe+713820:
+  dd 000000F4
+MarySkelter2.exe+71382C:
+  dd 000000F4
+MarySkelter2.exe+713838:
+  dd 000000F8
+MarySkelter2.exe+713844:
+  dd 000000F8
+MarySkelter2.exe+713850:
+  dd 000000F1
+MarySkelter2.exe+71385C:
+  dd 000000F2
+MarySkelter2.exe+713868:
+  dd 000000F4
+MarySkelter2.exe+713874:
+  dd 000000F8
+MarySkelter2.exe+713880:
+  dd 000000F1
+MarySkelter2.exe+71388C:
+  dd 000000F1
+MarySkelter2.exe+713898:
+  dd 000000F2
+MarySkelter2.exe+7138A4:
+  dd 000000F2
+MarySkelter2.exe+7138B0:
+  dd 000000F4
+MarySkelter2.exe+7138BC:
+  dd 000000F4
+MarySkelter2.exe+7138C8:
+  dd 000000F8
+MarySkelter2.exe+7138D4:
+  dd 000000F8
+MarySkelter2.exe+7138E0:
+  dd 000000F9
+MarySkelter2.exe+7138EC:
+  dd 000000F3
+MarySkelter2.exe+7138F8:
+  dd 000000F6
+MarySkelter2.exe+713904:
+  dd 000000FC
+MarySkelter2.exe+713910:
+  dd 000000FB
+MarySkelter2.exe+71391C:
+  dd 000000F7
+MarySkelter2.exe+713928:
+  dd 000000FE
+MarySkelter2.exe+713934:
+  dd 000000FD
+
+</AssemblerScript>
+            </CheatEntry>
             <CheatEntry>
               <ID>197</ID>
               <Description>"Field of View (Max recommended FOV is 79 degrees at 21:9) (Still need to find out what's causing the mesh culling)"</Description>
