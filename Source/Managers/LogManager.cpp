@@ -23,9 +23,12 @@ SOFTWARE.
 // Internal Functionality
 #include "LogManager.h"
 #include "../Settings/PlayerSettings.h"
+#include "../Utilities/CrashHandler.h"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <iostream>
 #include <windows.h>
 
@@ -45,6 +48,21 @@ EnigmaFix::LogManager EnigmaFix::LogManager::lm_Instance;
 // TODO: Figure out how to close up everything when the game exits. For some reason, the console window stays, and it doesn't save the full log files.
 namespace EnigmaFix
 {
+    namespace {
+        // An async logger queues messages for a worker thread and the file sink buffers them on top of that, so with no
+        // flush policy at all nothing reaches disk until the logger is destroyed on exit. If the game crashes, or is
+        // still running while the log is being read, the file just sits there empty.
+        //
+        // Warnings and errors flush immediately because those are the ones worth having when something goes wrong.
+        // Everything else rides a one second timer, which keeps the per-draw logging in RenderManager from paying for a
+        // file flush on every message.
+        void ApplyFlushPolicy(const std::shared_ptr<spdlog::async_logger>& logger)
+        {
+            logger->flush_on(spdlog::level::warn);
+            spdlog::flush_every(std::chrono::seconds(1));
+        }
+    }
+
     void LogManager::Init()
     {
         // Initialize async logging thread pool (if not already initialized)
@@ -87,6 +105,7 @@ namespace EnigmaFix
 
                 // Set the global logger
                 spdlog::set_default_logger(async_logger);
+                ApplyFlushPolicy(async_logger);
 
                 // Optional: Set a global log level and pattern
                 spdlog::set_level(spdlog::level::debug);  // Set global log level
@@ -99,6 +118,9 @@ namespace EnigmaFix
 
                 // Log initial message indicating successful initialization
                 spdlog::info("Logger initialized successfully.");
+
+                // Installed as soon as there is somewhere to write a report to.
+                CrashHandler::Init();
             }
             else {
                 std::cout << "File sink not initialized, logging will only be available in the console." << std::endl;
@@ -116,6 +138,7 @@ namespace EnigmaFix
 
                  // Set the global logger
                 spdlog::set_default_logger(async_logger);
+                ApplyFlushPolicy(async_logger);
 
                 // Optional: Set a global log level and pattern
                 spdlog::set_level(spdlog::level::debug);  // Set global log level
@@ -128,6 +151,9 @@ namespace EnigmaFix
 
                 // Log initial message indicating successful initialization
                 spdlog::info("Logger initialized successfully.");
+
+                // Installed as soon as there is somewhere to write a report to.
+                CrashHandler::Init();
             } else {
                 std::cout << "File sink not initialized, no logging available." << std::endl;
             }

@@ -26,6 +26,9 @@ SOFTWARE.
 
 // Plugins
 #include "../Plugins/Plugin_DERQ.h"
+#include "../Plugins/Plugin_DERQ2.h"
+#include "../Plugins/Plugin_Varnir.h"
+#include "../Plugins/Plugin_NVS.h"
 
 // Third Party Libraries
 //#include "../ThirdParty/ModUtils/MemoryMgr.h"
@@ -33,6 +36,9 @@ SOFTWARE.
 
 auto& PlayerSettingsPm = EnigmaFix::PlayerSettings::Get();
 auto& PluginDERQPm     = EnigmaFix::Plugin_DERQ::Get();
+auto& PluginDERQ2Pm    = EnigmaFix::Plugin_DERQ2::Get();
+auto& PluginVarnirPm   = EnigmaFix::Plugin_Varnir::Get();
+auto& PluginNVSPm      = EnigmaFix::Plugin_NVS::Get();
 
 // Singleton Instance
 EnigmaFix::PatchManager EnigmaFix::PatchManager::pm_Instance;
@@ -90,18 +96,39 @@ namespace EnigmaFix {
                 PluginDERQPm.UIPatches(BaseModule);
                 PluginDERQPm.LoggingPatches(BaseModule);
                 PluginDERQPm.SchedulerPatches(BaseModule);
+                break;
             }
             case PlayerSettingsPm.E_GameMode::DERQ2: {
+                PluginDERQ2Pm.ResolutionPatches(BaseModule);
+                PluginDERQ2Pm.AspectRatioPatches(BaseModule);
+                PluginDERQ2Pm.GraphicsSettingsPatches(BaseModule);
+                PluginDERQ2Pm.FOVPatches(BaseModule);
+                PluginDERQ2Pm.UIPatches(BaseModule);
+                PluginDERQ2Pm.VideoPatches(BaseModule);
+                break;
             }
             case PlayerSettingsPm.E_GameMode::Varnir: {
+                PluginVarnirPm.AspectRatioPatches(BaseModule);
+                PluginVarnirPm.GraphicsSettingsPatches(BaseModule);
+                PluginVarnirPm.FOVPatches(BaseModule);
+                PluginVarnirPm.FrameratePatches(BaseModule);
+                PluginVarnirPm.UIPatches(BaseModule);
+                break;
             }
             case PlayerSettingsPm.E_GameMode::VIIR: {
+                break;
             }
             case PlayerSettingsPm.E_GameMode::NVS: {
+                PluginNVSPm.ResolutionPatches(BaseModule);
+                PluginNVSPm.GraphicsSettingsPatches(BaseModule);
+                PluginNVSPm.UIPatches(BaseModule);
+                break;
             }
             case PlayerSettingsPm.E_GameMode::MS2: {
+                break;
             }
             case PlayerSettingsPm.E_GameMode::MSF: {
+                break;
             }
             default: break;
         }

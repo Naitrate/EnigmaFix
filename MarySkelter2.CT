@@ -108,74 +108,423 @@ call MarySkelter2.exe+3BCD60
 </AssemblerScript>
             </CheatEntry>
             <CheatEntry>
+              <ID>198</ID>
+              <Description>"Test Variable for Game Speed ((1 / 60) / (1 / 144)) "</Description>
+              <VariableType>Float</VariableType>
+              <Address>MarySkelter2.exe+794ED0</Address>
+            </CheatEntry>
+            <CheatEntry>
+              <ID>219</ID>
+              <Description>"Something that will lead to other framerate related addresses."</Description>
+              <ShowAsSigned>0</ShowAsSigned>
+              <VariableType>Float</VariableType>
+              <Address>7FF6E6780DC4</Address>
+            </CheatEntry>
+            <CheatEntry>
+              <ID>207</ID>
+              <Description>"Original 1.0 game speed var"</Description>
+              <ShowAsSigned>0</ShowAsSigned>
+              <VariableType>Float</VariableType>
+              <Address>7FF6ED6DF588</Address>
+            </CheatEntry>
+            <CheatEntry>
+              <ID>92</ID>
+              <Description>"Seemingly controls the framerate of some on-screen animations (Apparently -1 does something and causes some transitions to get stuck)"</Description>
+              <VariableType>Float</VariableType>
+              <Address>MarySkelter2.exe+6FFDC4</Address>
+            </CheatEntry>
+            <CheatEntry>
+              <ID>94</ID>
+              <Description>"A float variable that may lead to some framerate dependent gameplay logic and other things"</Description>
+              <ShowAsSigned>0</ShowAsSigned>
+              <VariableType>Float</VariableType>
+              <Address>7FF75118E588</Address>
+            </CheatEntry>
+            <CheatEntry>
               <ID>59</ID>
               <Description>"Fixes"</Description>
               <Options moManualExpandCollapse="1"/>
               <GroupHeader>1</GroupHeader>
               <CheatEntries>
                 <CheatEntry>
-                  <ID>57</ID>
-                  <Description>"WIP Character Bustup and Other Animation Speed Fix (Do not use atm)"</Description>
+                  <ID>287</ID>
+                  <Description>"Animation Fixes"</Description>
+                  <VariableType>Auto Assembler Script</VariableType>
+                  <AssemblerScript>//==============================================================================
+// Mary Skelter 2 (PC, v1.01) - Framerate-Independent Animation Fix
+// Engine: "prophet" (Compile Heart / Idea Factory in-house)
+// Requires: the framerate cap to already be disabled.
+//==============================================================================
+//
+// WHY ANIMATIONS RUN FAST AFTER UNLOCKING THE FRAMERATE
+// -----------------------------------------------------
+// 1) Framework_GetDeltaTime()          MarySkelter2.exe+14D790
+//      return g_Framework-&gt;deltaTime;  // field +0x128
+//    That field is a HARDCODED 1/60 (0.0166666754). It is never updated from
+//    real elapsed time. Every 2D tween in the engine does:
+//        tween.time += Framework_GetDeltaTime();
+//        value       = Tween_Evaluate(tween);
+//    so at N fps every 2D/UI/VN animation plays at N/60 speed.
+//
+// 2) The engine ALREADY measures a real per-frame delta and stores it at
+//      MarySkelter2.exe+136565C   (float, seconds)   -&gt; g_realFrameDelta
+//    and a smoothed framerate at
+//      [[MarySkelter2.exe+A6A3A8]+0xC0]  (float, fps)
+//
+// 3) GetFrameStepScale()               MarySkelter2.exe+1391C0
+//      return max(60.0f / measuredFps, 1.0f);
+//    This is the engine's own compensation for frame-COUNT based animations
+//    (used by 8 callers). It works going down (30fps -&gt; 2.0) but the maxss
+//    floor of 1.0 means it can never scale below 60fps. Above 60 it is stuck
+//    at 1.0 and those animations run fast.
+//
+// 4) UpdateFrameCounterTween()         MarySkelter2.exe+10D980
+//      obj-&gt;frame += 1.0f;  ratio = obj-&gt;frame / (float)obj-&gt;durationInFrames;
+//    Both branches (+10D9A5 and +10D9B5) add a literal 1.0 per update.
+//
+// WHAT THIS SCRIPT DOES
+// ---------------------
+//  * Framework_GetDeltaTime -&gt; returns the real measured delta (clamped to
+//    1/30 max so a hitch can't make animations jump).
+//  * Maintains g_frameScale = realDelta * 60  (= "frames elapsed this update",
+//    1.0 at 60fps, 0.5 at 120fps, 2.0 at 30fps), clamped to [0.02, 2.0].
+//  * GetFrameStepScale -&gt; returns g_frameScale, removing the 1.0 floor.
+//  * Both +=1.0 sites in UpdateFrameCounterTween -&gt; += g_frameScale.
+//
+// REPLACES (disable these first, they conflict / fight each other):
+//  - "WIP Character Bustup and Other Animation Speed Fix"   (+119493, +10D9B5)
+//        +119493 was wrong: that 1.0 is an identity/clamp constant inside the
+//        bone transform routine, not an animation step.
+//  - "Some sort of animation speed?"          (+1391D7 maxss floor)
+//  - "Fix Some Particle Animation Speed"      (+14D790)
+//  - "Potential Slowdown Fix?"                (+125FDB)
+//  - the two unnamed Auto Assemble scripts    (+98422 +9AE82 +A0291 +CBB3A +CBB6A)
+//        THESE WERE THE MAIN CULPRIT: they replaced `call GetDeltaTime` with a
+//        hardcoded 1/60 inside UpdateTweenList_A/B/C and UpdateBustupBlinkState,
+//        i.e. exactly the 2D + VN animation updaters.
+//
+// g_frameScale is exported as a CE symbol - you can add it to the table as a
+// Float to watch it live (should read ~60/your_fps).
+//==============================================================================
+
+[ENABLE]
+alloc(fpsfix,512,"MarySkelter2.exe")
+label(g_frameScale)
+label(c_scaleMin)
+label(c_scaleMax)
+label(c_deltaMax)
+label(GetDeltaTime_new)
+label(GetFrameStep_new)
+registersymbol(fpsfix)
+registersymbol(g_frameScale)
+
+fpsfix:
+g_frameScale:
+ dd (float)1.0
+c_scaleMin:
+ dd (float)0.02
+c_scaleMax:
+ dd (float)2.0
+c_deltaMax:
+ dd (float)0.0333333
+
+// Framework_GetDeltaTime -&gt; real delta; also refresh g_frameScale
+GetDeltaTime_new:
+ movss xmm0,[MarySkelter2.exe+700DC4]     // 60.0
+ mulss xmm0,[MarySkelter2.exe+136565C]    // 60 * realDelta
+ maxss xmm0,[c_scaleMin]
+ minss xmm0,[c_scaleMax]
+ movss [g_frameScale],xmm0
+ movss xmm0,[MarySkelter2.exe+136565C]
+ minss xmm0,[c_deltaMax]
+ ret
+
+// GetFrameStepScale -&gt; frames elapsed this update, no 1.0 floor
+GetFrameStep_new:
+ movss xmm0,[g_frameScale]
+ ret
+
+"MarySkelter2.exe"+14D790:
+ jmp GetDeltaTime_new
+
+"MarySkelter2.exe"+1391C0:
+ jmp GetFrameStep_new
+
+"MarySkelter2.exe"+10D9A5:
+ movss xmm6,[g_frameScale]
+
+"MarySkelter2.exe"+10D9B5:
+ addss xmm4,[g_frameScale]
+
+[DISABLE]
+"MarySkelter2.exe"+14D790:
+ db 48 8B 05 61 F7 91 00 F3 0F 10 80 28 01 00 00 C3
+
+"MarySkelter2.exe"+1391C0:
+ db 48 8B 05 E1 11 93 00 F3 0F 10 05 F5 7B 5C 00 F3 0F 5E 80 C0 00 00 00 F3 0F 5F 05 A9 63 5C 00 C3
+
+"MarySkelter2.exe"+10D9A5:
+ db F3 0F 10 35 DB 1B 5F 00
+
+"MarySkelter2.exe"+10D9B5:
+ db F3 0F 58 25 3B 8A BF 00
+
+unregistersymbol(g_frameScale)
+unregistersymbol(fpsfix)
+dealloc(fpsfix)
+
+//==============================================================================
+// ADDRESS MAP (RVA from MarySkelter2.exe base; Ghidra base 0x7FF6A35D0000)
+//==============================================================================
+// CODE
+//  +14D790   Framework_GetDeltaTime()      return g_Framework-&gt;deltaTime  (1/60)
+//  +14D7A0   Framework_GetFramerate()      return 1.0f / deltaTime
+//  +1391C0   GetFrameStepScale()           max(60/fps, 1.0)
+//  +113130   Tween_Evaluate(tween)         {curve,from,to,time,duration,ease}
+//  +10D980   UpdateFrameCounterTween()     frame += 1.0
+//  +98400    UpdateTweenList_A             tween.time += GetDeltaTime()
+//  +9AE60    UpdateTweenList_B             (patched by old script 281/280)
+//  +A0270    UpdateTweenList_C
+//  +CBA40    UpdateBustupBlinkState        blink/expression timer (VN portraits)
+//  +125FC0   audio/logic tick accumulator
+//  +3BCD60   FrameLimiter_Wait()           spin/Sleep to the target frame time
+//  +3B1AE0   GetTargetFrameTimeMs()        switch on mode at obj+0xA0
+//                                          mode 1 -&gt; 0ms = uncapped
+//
+// DATA
+//  +136565C  g_realFrameDelta   float, real seconds per frame  (LIVE)
+//  +A6CEF8   -&gt; g_Framework;  +0x128 = deltaTime (pinned 1/60), +0x120 = 1
+//  +A6A3A8   -&gt; g_Graphics;   +0xC0 = measured fps, +0xA0 = fps mode
+//  +700DC4   60.0f
+//  +700638   0.0166666754f  (1/60 - the fixed timestep constant)
+//  +6FF588   1.0f  (generic engine constant - do NOT repurpose globally)
+//  +D063F8   1.0f  (frame-counter step in UpdateFrameCounterTween)
+//  +7270DC   16.6666f  (target frame time in ms, 60fps mode)
+//==============================================================================
+
+</AssemblerScript>
+                </CheatEntry>
+                <CheatEntry>
+                  <ID>289</ID>
+                  <Description>"Stage 2: GetFrameStepScale - remove 1.0 floor"</Description>
                   <VariableType>Auto Assembler Script</VariableType>
                   <AssemblerScript>[ENABLE]
-alloc(newmem2,2048,"MarySkelter2.exe"+119493)
-label(returnhere2)
-label(originalcode2)
-label(exit2)
+//==============================================================================
+// Stage 2 - GetFrameStepScale: remove the 1.0 floor
+//
+// MarySkelter2.exe+1391C0  GetFrameStepScale()
+//    mov   rax,[g_Graphics]
+//    movss xmm0,[60.0]
+//    divss xmm0,[rax+0xC0]      ; 60 / measuredFps
+//    maxss xmm0,[1.0]           ; &lt;-- floor: can never scale below 60fps
+//    ret
+//
+// This is the engine's own compensation for frame-COUNT based animation.
+// It works downward (30fps -&gt; 2.0) but the floor pins it at 1.0 above 60fps.
+// Callers include the event/script playback cursor, UI parameter tweens and
+// transition timers - i.e. the menu and 2D animation layer.
+//
+// The floor is replaced with a CEILING of 2.0 (same 8 bytes, in place, no cave):
+//   360fps -&gt; 0.167   60fps -&gt; 1.0   30fps -&gt; 2.0 (unchanged)   fps=0 -&gt; 2.0
+// The cap also makes this SAFER than stock: the original would return +inf if
+// measuredFps were ever 0, this cannot.
+//==============================================================================
+alloc(fsconst,64,"MarySkelter2.exe")
+label(c_stepMax)
+registersymbol(fsconst)
 
-newmem2: //this is allocated memory, you have read,write,execute access
-//place your code here
-movss xmm10,[MarySkelter2.exe+794ED0]
+fsconst:
+c_stepMax:
+ dd (float)2.0
 
-originalcode2:
-// movss xmm10,[MarySkelter2.exe+6FF588]
-// Signature: f3 44 0f 10 15 ? ? ? ? 45 0f 29 9b
+"MarySkelter2.exe"+1391D7:
+ minss xmm0,[c_stepMax]
 
-exit2:
-jmp returnhere2
-
-"MarySkelter2.exe"+119493:
-jmp newmem2
-nop 4
-returnhere2:
-
-
-//code from here to '[DISABLE]' will be used to enable the cheat
-alloc(newmem,2048,"MarySkelter2.exe"+10D9B5)
-label(returnhere)
-label(originalcode)
-label(exit)
-
-newmem: //this is allocated memory, you have read,write,execute access
-//place your code here
-addss xmm4,[MarySkelter2.exe+794ED0]
-
-originalcode:
-//addss xmm4,[MarySkelter2.exe+D04168]
-//Signature: f3 0f 58 25 ? ? ? ? 0f 57 c9
-
-exit:
-jmp returnhere
-
-"MarySkelter2.exe"+10D9B5:
-jmp newmem
-nop 3
-returnhere:
-
-
-
- 
- 
 [DISABLE]
-//code from here till the end of the code will be used to disable the cheat
-dealloc(newmem2)
-"MarySkelter2.exe"+119493:
-movss xmm10,[MarySkelter2.exe+6FF588]
-//Alt: db F3 44 0F 10 15 3C 52 5E 00
-dealloc(newmem)
-"MarySkelter2.exe"+10D9B5:
-addss xmm4,[MarySkelter2.exe+D063F8]
-//Alt: db F3 0F 58 25 FB 68 BF 00
+"MarySkelter2.exe"+1391D7:
+ db F3 0F 5F 05 A9 63 5C 00
+
+unregistersymbol(fsconst)
+dealloc(fsconst)
+</AssemblerScript>
+                </CheatEntry>
+                <CheatEntry>
+                  <ID>290</ID>
+                  <Description>"Stage 3: 2D/Live2D animation cursor - scale by 60/fps"</Description>
+                  <VariableType>Auto Assembler Script</VariableType>
+                  <AssemblerScript>[ENABLE]
+//==============================================================================
+// Stage 3 - Framerate-independent 2D / Live2D animation cursor
+//
+// MarySkelter2.exe+12DB70  AdvanceAnimCursor(track, state, stepInFrames)
+//   +12DB7E  mulss xmm2,[rdx+0C]   ; step *= track-&gt;speedMultiplier
+//   +12DBF3  movss [rdx],xmm2      ; cursor += step
+//
+// All four callers pass a hardcoded 1.0 ("advance one frame") with no
+// framerate scaling. Verified live: the cursor climbed +1.0 per RENDERED
+// frame (362/sec at 360fps); with this patch it runs at 59.4/sec = 60fps.
+//
+// Reads neither g_Framework-&gt;deltaTime nor GetFrameStepScale.
+//
+// 5-byte mulss replaced by a 5-byte jmp - exact fit. Cave uses only mulss/jmp:
+// no registers, no stack, no EFLAGS (a comiss at +12DB78 is consumed by a jb
+// at +12DB83, straddling this site).
+//
+// g_animScale is held at 60/currentFps by the Lua timer below.
+//==============================================================================
+alloc(animfix,64,"MarySkelter2.exe")
+label(g_animScale)
+label(AnimStepHook)
+label(anim_ret)
+registersymbol(animfix)
+registersymbol(g_animScale)
+
+animfix:
+g_animScale:
+ dd (float)1.0
+
+AnimStepHook:
+ mulss xmm2,[rdx+0C]
+ mulss xmm2,[g_animScale]
+ jmp anim_ret
+
+"MarySkelter2.exe"+12DB7E:
+ jmp AnimStepHook
+anim_ret:
+
+{$lua}
+if syntaxcheck then return end
+if MS2_animTimer ~= nil then pcall(function() MS2_animTimer.destroy() end) end
+MS2_animTimer = createTimer(nil, false)
+MS2_animTimer.Interval = 50
+MS2_animTimer.OnTimer = function(t)
+  pcall(function()
+    local b = getAddress("MarySkelter2.exe")
+    local g = readQword(b + 0xA6A3A8)
+    local gs = getAddress("g_animScale")
+    local fps = readFloat(g + 0xC0)
+    if fps and fps &gt; 1 then
+      local s = 60.0 / fps
+      if s &lt; 0.02 then s = 0.02 end
+      if s &gt; 2.0 then s = 2.0 end
+      writeFloat(gs, s)
+    end
+  end)
+end
+MS2_animTimer.Enabled = true
+{$asm}
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+if MS2_animTimer ~= nil then
+  pcall(function() MS2_animTimer.destroy() end)
+  MS2_animTimer = nil
+end
+{$asm}
+
+"MarySkelter2.exe"+12DB7E:
+ db F3 0F 59 52 0C
+
+unregistersymbol(g_animScale)
+unregistersymbol(animfix)
+dealloc(animfix)
+</AssemblerScript>
+                </CheatEntry>
+                <CheatEntry>
+                  <ID>293</ID>
+                  <Description>"Stage 4: global UI sine phases - scale by 60/fps"</Description>
+                  <VariableType>Auto Assembler Script</VariableType>
+                  <AssemblerScript>[ENABLE]
+//==============================================================================
+// Stage 4 - global UI sine phases: advance per 60Hz tick, not per rendered frame
+//
+// FUN @ MarySkelter2.exe+109580, runs once per rendered frame:
+//   +1095B1  addss xmm2,[+70052C]   ; phase A += 0.60 rad
+//   +1095B9  addss xmm1,[+6FFD50]   ; phase B += 0.20 rad
+//   +1095C1  addss xmm0,[+700C00]   ; phase C += 0.05 rad
+//   (wrapped against pi / 2*pi, stored at +D05D58 / +D05D5C / +D05D60)
+//
+// Three global sine phases driving pulsing/blinking UI. Fixed radians per
+// RENDERED frame, no scaling: phase B is ~1.9Hz at 60fps but ~11.5Hz at 360.
+//
+// Fix: repoint each operand at a scaled copy (const * 60/fps). Three in-place
+// 8-byte operand rewrites - identical length, no jmp, no cave, no control flow
+// or stack change. The constants themselves are shared globals and are NOT
+// modified.
+//==============================================================================
+alloc(phasefix,64,"MarySkelter2.exe")
+label(s_phaseA)
+label(s_phaseB)
+label(s_phaseC)
+registersymbol(phasefix)
+registersymbol(s_phaseA)
+registersymbol(s_phaseB)
+registersymbol(s_phaseC)
+
+phasefix:
+s_phaseA:
+ dd (float)0.6
+s_phaseB:
+ dd (float)0.2
+s_phaseC:
+ dd (float)0.05
+
+"MarySkelter2.exe"+1095B1:
+ addss xmm2,[s_phaseA]
+
+"MarySkelter2.exe"+1095B9:
+ addss xmm1,[s_phaseB]
+
+"MarySkelter2.exe"+1095C1:
+ addss xmm0,[s_phaseC]
+
+{$lua}
+if syntaxcheck then return end
+if MS2_phaseTimer ~= nil then pcall(function() MS2_phaseTimer.destroy() end) end
+MS2_phaseTimer = createTimer(nil, false)
+MS2_phaseTimer.Interval = 50
+MS2_phaseTimer.OnTimer = function(t)
+  pcall(function()
+    local b = getAddress("MarySkelter2.exe")
+    local g = readQword(b + 0xA6A3A8)
+    local fps = readFloat(g + 0xC0)
+    if fps and fps &gt; 1 then
+      local s = 60.0 / fps
+      if s &lt; 0.02 then s = 0.02 end
+      if s &gt; 2.0 then s = 2.0 end
+      writeFloat(getAddress("s_phaseA"), 0.6  * s)
+      writeFloat(getAddress("s_phaseB"), 0.2  * s)
+      writeFloat(getAddress("s_phaseC"), 0.05 * s)
+    end
+  end)
+end
+MS2_phaseTimer.Enabled = true
+{$asm}
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+if MS2_phaseTimer ~= nil then
+  pcall(function() MS2_phaseTimer.destroy() end)
+  MS2_phaseTimer = nil
+end
+{$asm}
+
+"MarySkelter2.exe"+1095B1:
+ db F3 0F 58 15 73 6F 5F 00
+
+"MarySkelter2.exe"+1095B9:
+ db F3 0F 58 0D 8F 67 5F 00
+
+"MarySkelter2.exe"+1095C1:
+ db F3 0F 58 05 37 76 5F 00
+
+unregistersymbol(s_phaseA)
+unregistersymbol(s_phaseB)
+unregistersymbol(s_phaseC)
+unregistersymbol(phasefix)
+dealloc(phasefix)
 </AssemblerScript>
                 </CheatEntry>
                 <CheatEntry>
@@ -335,40 +684,172 @@ db E8 21 1C 08 00
 
 </AssemblerScript>
                 </CheatEntry>
+                <CheatEntry>
+                  <ID>292</ID>
+                  <Description>"Old"</Description>
+                  <GroupHeader>1</GroupHeader>
+                  <CheatEntries>
+                    <CheatEntry>
+                      <ID>57</ID>
+                      <Description>"WIP Character Bustup and Other Animation Speed Fix (Do not use atm)"</Description>
+                      <VariableType>Auto Assembler Script</VariableType>
+                      <AssemblerScript>[ENABLE]
+alloc(newmem2,2048,"MarySkelter2.exe"+119493)
+label(returnhere2)
+label(originalcode2)
+label(exit2)
+
+newmem2: //this is allocated memory, you have read,write,execute access
+//place your code here
+movss xmm10,[MarySkelter2.exe+794ED0]
+
+originalcode2:
+// movss xmm10,[MarySkelter2.exe+6FF588]
+// Signature: f3 44 0f 10 15 ? ? ? ? 45 0f 29 9b
+
+exit2:
+jmp returnhere2
+
+"MarySkelter2.exe"+119493:
+jmp newmem2
+nop 4
+returnhere2:
+
+
+//code from here to '[DISABLE]' will be used to enable the cheat
+alloc(newmem,2048,"MarySkelter2.exe"+10D9B5)
+label(returnhere)
+label(originalcode)
+label(exit)
+
+newmem: //this is allocated memory, you have read,write,execute access
+//place your code here
+addss xmm4,[MarySkelter2.exe+794ED0]
+
+originalcode:
+//addss xmm4,[MarySkelter2.exe+D04168]
+//Signature: f3 0f 58 25 ? ? ? ? 0f 57 c9
+
+exit:
+jmp returnhere
+
+"MarySkelter2.exe"+10D9B5:
+jmp newmem
+nop 3
+returnhere:
+
+
+
+ 
+ 
+[DISABLE]
+//code from here till the end of the code will be used to disable the cheat
+dealloc(newmem2)
+"MarySkelter2.exe"+119493:
+movss xmm10,[MarySkelter2.exe+6FF588]
+//Alt: db F3 44 0F 10 15 3C 52 5E 00
+dealloc(newmem)
+"MarySkelter2.exe"+10D9B5:
+addss xmm4,[MarySkelter2.exe+D063F8]
+//Alt: db F3 0F 58 25 FB 68 BF 00
+</AssemblerScript>
+                    </CheatEntry>
+                    <CheatEntry>
+                      <ID>288</ID>
+                      <Description>"Framerate-Independent Animation Fix v2 (variable timestep)"</Description>
+                      <VariableType>Auto Assembler Script</VariableType>
+                      <AssemblerScript>[ENABLE]
+//==============================================================================
+// Mary Skelter 2 - Framerate-Independent Animation Fix v2
+// 1) Force the engine's own variable-timestep mode ON (g_Framework+0x120 = 0)
+//    -&gt; g_Framework-&gt;deltaTime becomes a real per-frame delta, written by the
+//       engine. Fixes the getter AND every inlined reader of the field.
+// 2) Publish g_frameScale = deltaTime*60 ("frames elapsed this update")
+// 3) GetFrameStepScale: drop the max(...,1.0) floor that blocks &gt;60fps
+// 4) UpdateFrameCounterTween: step by g_frameScale instead of a literal 1.0
+//==============================================================================
+alloc(fpsfix,1024,"MarySkelter2.exe")
+label(g_frameScale)
+label(c_scaleMin)
+label(c_scaleMax)
+label(ForceVarTimestep)
+label(vt_ret)
+label(GetDeltaTime_new)
+label(GetFrameStep_new)
+registersymbol(fpsfix)
+registersymbol(g_frameScale)
+
+fpsfix:
+g_frameScale:
+ dd (float)1.0
+c_scaleMin:
+ dd (float)0.02
+c_scaleMax:
+ dd (float)2.0
+
+ForceVarTimestep:
+ mov rax,[rsp+00000080]
+ push rcx
+ xor ecx,ecx
+ mov [rax+00000120],ecx
+ pop rcx
+ jmp vt_ret
+
+"MarySkelter2.exe"+424FD9:
+ jmp ForceVarTimestep
+ nop 3
+vt_ret:
+
+GetDeltaTime_new:
+ mov rax,[MarySkelter2.exe+A6CEF8]
+ movss xmm0,[MarySkelter2.exe+700DC4]
+ mulss xmm0,[rax+00000128]
+ maxss xmm0,[c_scaleMin]
+ minss xmm0,[c_scaleMax]
+ movss [g_frameScale],xmm0
+ movss xmm0,[rax+00000128]
+ ret
+
+"MarySkelter2.exe"+14D790:
+ jmp GetDeltaTime_new
+
+GetFrameStep_new:
+ movss xmm0,[g_frameScale]
+ ret
+
+"MarySkelter2.exe"+1391C0:
+ jmp GetFrameStep_new
+
+"MarySkelter2.exe"+10D9A5:
+ movss xmm6,[g_frameScale]
+
+"MarySkelter2.exe"+10D9B5:
+ addss xmm4,[g_frameScale]
+
+[DISABLE]
+"MarySkelter2.exe"+424FD9:
+ db 48 8B 84 24 80 00 00 00
+
+"MarySkelter2.exe"+14D790:
+ db 48 8B 05 61 F7 91 00 F3 0F 10 80 28 01 00 00 C3
+
+"MarySkelter2.exe"+1391C0:
+ db 48 8B 05 E1 11 93 00 F3 0F 10 05 F5 7B 5C 00 F3 0F 5E 80 C0 00 00 00 F3 0F 5F 05 A9 63 5C 00 C3
+
+"MarySkelter2.exe"+10D9A5:
+ db F3 0F 10 35 DB 1B 5F 00
+
+"MarySkelter2.exe"+10D9B5:
+ db F3 0F 58 25 3B 8A BF 00
+
+unregistersymbol(g_frameScale)
+unregistersymbol(fpsfix)
+dealloc(fpsfix)
+</AssemblerScript>
+                    </CheatEntry>
+                  </CheatEntries>
+                </CheatEntry>
               </CheatEntries>
-            </CheatEntry>
-            <CheatEntry>
-              <ID>198</ID>
-              <Description>"Test Variable for Game Speed ((1 / 60) / (1 / 144)) "</Description>
-              <VariableType>Float</VariableType>
-              <Address>MarySkelter2.exe+794ED0</Address>
-            </CheatEntry>
-            <CheatEntry>
-              <ID>219</ID>
-              <Description>"Something that will lead to other framerate related addresses."</Description>
-              <ShowAsSigned>0</ShowAsSigned>
-              <VariableType>Float</VariableType>
-              <Address>7FF6E6780DC4</Address>
-            </CheatEntry>
-            <CheatEntry>
-              <ID>207</ID>
-              <Description>"Original 1.0 game speed var"</Description>
-              <ShowAsSigned>0</ShowAsSigned>
-              <VariableType>Float</VariableType>
-              <Address>7FF6ED6DF588</Address>
-            </CheatEntry>
-            <CheatEntry>
-              <ID>92</ID>
-              <Description>"Seemingly controls the framerate of some on-screen animations (Apparently -1 does something and causes some transitions to get stuck)"</Description>
-              <VariableType>Float</VariableType>
-              <Address>MarySkelter2.exe+6FFDC4</Address>
-            </CheatEntry>
-            <CheatEntry>
-              <ID>94</ID>
-              <Description>"A float variable that may lead to some framerate dependent gameplay logic and other things"</Description>
-              <ShowAsSigned>0</ShowAsSigned>
-              <VariableType>Float</VariableType>
-              <Address>7FF75118E588</Address>
             </CheatEntry>
           </CheatEntries>
         </CheatEntry>
@@ -2119,6 +2600,371 @@ db E8 B0 77 02 00
       <ShowAsSigned>0</ShowAsSigned>
       <VariableType>Float</VariableType>
       <Address>MarySkelter2.exe+10E5D24 </Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>294</ID>
+      <Description>"Stage 5: smooth movement/turn (fractional frame index)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+//==============================================================================
+// Stage 5 - smooth dungeon movement/turn (remove whole-frame quantisation)
+//
+// MarySkelter2.exe+30E450  (a GetFrameStepScale caller - the movement curve)
+//   +30E49E  movss xmm9,[rcx+64]        ; t = elapsed, in frames
+//   +30E4A4  call GetFrameStepScale
+//   +30E4B8  mulss xmm9,[1.0]
+//   +30E4C1  cvttss2si edx,xmm9         ; n = (int)t   &lt;-- TRUNCATED
+//   ...loop sums acceleration over n whole frames into xmm6/xmm7/xmm8...
+//   +30E5BF  xorps    xmm2,xmm2
+//   +30E5C2  cvtsi2ss xmm2,edx          ; nf = (float)n   &lt;-- back to float
+//   +30E5CC  mulss xmm0,[rdi+40] / subss xmm0,xmm6 / addss [r15] ...
+//
+// Displacement = nf*velocity - accumulatedAccel. Because nf comes from the
+// TRUNCATED frame index, the position only moves when t crosses an integer.
+// With Stage 2 the step is 60/fps (0.167 at 360fps), so that is once every 6
+// rendered frames - correct speed, but 60Hz motion. Before Stage 2 the step
+// was 1.0/frame so it moved every frame (smooth, 6x too fast).
+//
+// Fix: feed the FRACTIONAL t into the dominant velocity term instead of the
+// truncated integer. 7 bytes replaced by 7 bytes, in place - no cave, no jump,
+// no control flow or stack change. The acceleration sum still uses whole
+// frames; that term is the smaller correction.
+//==============================================================================
+"MarySkelter2.exe"+30E5BF:
+ movss xmm2,[rdi+64]
+ nop
+ nop
+
+[DISABLE]
+"MarySkelter2.exe"+30E5BF:
+ db 0F 57 D2 F3 0F 2A D2
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>295</ID>
+      <Description>"Stage 9: yaw interpolation + per-frame transform rebuild"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+//==============================================================================
+// Stage 9 - camera yaw interpolation + per-frame transform rebuild
+//
+// THE MISSING PIECE: FUN @ MarySkelter2.exe+BCA00 is the camera transform
+// builder. It reads the euler yaw at camObj+0x434, converts it to the
+// quaternion at camObj+0x090 and the view matrix at camObj+0x290 - which is
+// what the renderer actually draws from.
+//
+// Measured: that builder only runs ~once per 3.2 rendered frames (218 quaternion
+// changes over 696 frames). So interpolating +0x434 every frame achieved
+// nothing - the conversion to the matrix the renderer uses happened at ~60Hz
+// and simply resampled the staircase. The euler field is not vestigial, it is
+// just read too rarely.
+//
+// Fix: interpolate +0x434 as before, then CALL the builder every frame so the
+// quaternion and matrix are regenerated from the interpolated angle.
+//
+//   if target changed:  prev = last; last = target; tick = frameCounter
+//   alpha = clamp((frameCounter - tick) / holdFrames, 0, 1)
+//   +0x434 = prev + wrap(last - prev) * alpha
+//   rebuild(camObj)
+//
+// The call uses sub rsp,28 for 16-byte alignment plus 0x20 shadow space, per
+// the x64 ABI. The builder is gated on camObj+0x414 == 0 (verified 0) and does
+// not call back into SetCameraYaw, so no recursion.
+//
+// Self-contained. Code before data. No dealloc on disable.
+//==============================================================================
+alloc(msCamY,4096,"MarySkelter2.exe")
+label(SmYaw)
+label(y_nohi)
+label(y_nolo)
+label(y_write)
+label(y_ret)
+label(g_hold)
+label(c_one)
+label(c_zero)
+label(c_pi)
+label(c_npi)
+label(c_2pi)
+label(yprev)
+label(ylast)
+label(ytick)
+registersymbol(msCamY)
+registersymbol(g_hold)
+registersymbol(ylast)
+registersymbol(yprev)
+registersymbol(ytick)
+
+msCamY:
+SmYaw:
+ comiss xmm0,[ylast]
+ je y_nohi
+ movss xmm1,[ylast]
+ movss [yprev],xmm1
+ movss [ylast],xmm0
+ mov eax,[MarySkelter2.exe+D05428]
+ mov [ytick],eax
+y_nohi:
+ mov eax,[MarySkelter2.exe+D05428]
+ sub eax,[ytick]
+ cvtsi2ss xmm2,eax
+ divss xmm2,[g_hold]
+ minss xmm2,[c_one]
+ maxss xmm2,[c_zero]
+ movss xmm3,[ylast]
+ subss xmm3,[yprev]
+ comiss xmm3,[c_pi]
+ jbe y_nolo
+ subss xmm3,[c_2pi]
+y_nolo:
+ comiss xmm3,[c_npi]
+ jae y_write
+ addss xmm3,[c_2pi]
+y_write:
+ mulss xmm3,xmm2
+ addss xmm3,[yprev]
+ mov rax,[MarySkelter2.exe+A6CEB0]
+ test rax,rax
+ je y_ret
+ mov rcx,[rax+40]
+ test rcx,rcx
+ je y_ret
+ movss [rcx+00000434],xmm3
+ sub rsp,28
+ call "MarySkelter2.exe"+BCA00
+ add rsp,28
+y_ret:
+ ret
+
+g_hold:
+ dd (float)6.0
+c_one:
+ dd (float)1.0
+c_zero:
+ dd (float)0.0
+c_pi:
+ dd (float)3.14159265
+c_npi:
+ dd (float)-3.14159265
+c_2pi:
+ dd (float)6.28318531
+yprev:
+ dd (float)0.0
+ylast:
+ dd (float)0.0
+ytick:
+ dd 0
+
+"MarySkelter2.exe"+BD760:
+ jmp SmYaw
+
+{$lua}
+if syntaxcheck then return end
+if MS2_holdTimer ~= nil then pcall(function() MS2_holdTimer.destroy() end) end
+MS2_lastF=nil MS2_lastT=nil
+MS2_holdTimer = createTimer(nil,false)
+MS2_holdTimer.Interval = 100
+MS2_holdTimer.OnTimer = function(t)
+  pcall(function()
+    local b=getAddress("MarySkelter2.exe")
+    local f=readInteger(b+0xD05428)
+    local now=getTickCount()
+    if MS2_lastF and f and f&gt;MS2_lastF and now&gt;MS2_lastT then
+      local hold=((f-MS2_lastF)*1000/(now-MS2_lastT))/60.0
+      if hold&lt;1.0 then hold=1.0 end
+      if hold&gt;30.0 then hold=30.0 end
+      local cur=readFloat(getAddress("g_hold")) or hold
+      writeFloat(getAddress("g_hold"), cur+(hold-cur)*0.3)
+    end
+    MS2_lastF=f MS2_lastT=now
+  end)
+end
+MS2_holdTimer.Enabled=true
+{$asm}
+
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+if MS2_holdTimer ~= nil then pcall(function() MS2_holdTimer.destroy() end) MS2_holdTimer=nil end
+{$asm}
+
+"MarySkelter2.exe"+BD760:
+ db 48 8B 05 49 F7 9A 00 48 8B 48 40 F3 0F 11 81 34 04 00 00 C3
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>296</ID>
+      <Description>"DIAGNOSTIC: camera spin test (not a fix)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+//==============================================================================
+// DIAGNOSTIC ONLY - "does the scene actually re-render every frame?"
+//
+// Drives the camera yaw directly from the frame counter, so it spins at a
+// constant rate with a NEW value on every single rendered frame, then forces
+// the transform builder (+BCA00) so the view matrix is rebuilt each frame too.
+//
+// 0.02 rad/frame at ~350fps = ~7 rad/s (about 1.1 rotations per second).
+//   * If the scene renders every frame  -&gt; ~350 distinct positions/sec, smooth
+//   * If the scene renders at ~60Hz     -&gt; 60 steps of 6.7 deg each, obviously chunky
+//
+// This is not a fix. It makes the camera spin on its own.
+//==============================================================================
+alloc(msSpin,1024,"MarySkelter2.exe")
+label(SpinTest)
+label(s_ret)
+label(sp_k)
+label(sp_pi)
+registersymbol(msSpin)
+registersymbol(sp_k)
+
+msSpin:
+SpinTest:
+ mov eax,[MarySkelter2.exe+D05428]
+ and eax,000003FF
+ cvtsi2ss xmm3,eax
+ mulss xmm3,[sp_k]
+ subss xmm3,[sp_pi]
+ mov rax,[MarySkelter2.exe+A6CEB0]
+ test rax,rax
+ je s_ret
+ mov rcx,[rax+40]
+ test rcx,rcx
+ je s_ret
+ movss [rcx+00000434],xmm3
+ sub rsp,28
+ call "MarySkelter2.exe"+BCA00
+ add rsp,28
+s_ret:
+ ret
+
+sp_k:
+ dd (float)0.02
+sp_pi:
+ dd (float)3.14159265
+
+"MarySkelter2.exe"+BD760:
+ jmp SpinTest
+
+[DISABLE]
+"MarySkelter2.exe"+BD760:
+ db 48 8B 05 49 F7 9A 00 48 8B 48 40 F3 0F 11 81 34 04 00 00 C3
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>297</ID>
+      <Description>"DIAGNOSTIC A/B: spin, per-frame vs 60Hz (sp2_div)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+alloc(spinab,4096,"MarySkelter2.exe")
+label(Spin2)
+label(sp2_ret)
+label(sp2_k)
+label(sp2_pi)
+label(sp2_div)
+registersymbol(spinab)
+registersymbol(sp2_div)
+registersymbol(sp2_k)
+
+spinab:
+Spin2:
+ mov eax,[MarySkelter2.exe+D05428]
+ and eax,000003FF
+ xor edx,edx
+ div dword ptr [sp2_div]
+ mul dword ptr [sp2_div]
+ cvtsi2ss xmm3,eax
+ mulss xmm3,[sp2_k]
+ subss xmm3,[sp2_pi]
+ mov rax,[MarySkelter2.exe+A6CEB0]
+ test rax,rax
+ je sp2_ret
+ mov rcx,[rax+40]
+ test rcx,rcx
+ je sp2_ret
+ movss [rcx+00000434],xmm3
+ sub rsp,28
+ call "MarySkelter2.exe"+BCA00
+ add rsp,28
+sp2_ret:
+ ret
+
+sp2_k:
+ dd (float)0.02
+sp2_pi:
+ dd (float)3.14159265
+sp2_div:
+ dd 00000001
+
+"MarySkelter2.exe"+BD760:
+ jmp Spin2
+
+[DISABLE]
+"MarySkelter2.exe"+BD760:
+ db 48 8B 05 49 F7 9A 00 48 8B 48 40 F3 0F 11 81 34 04 00 00 C3
+
+unregistersymbol(sp2_k)
+unregistersymbol(sp2_div)
+unregistersymbol(spinab)
+</AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>298</ID>
+      <Description>"DIAGNOSTIC: flicker-fusion present-rate test (fl_div)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>[ENABLE]
+alloc(flick,4096,"MarySkelter2.exe")
+label(Flick)
+label(fl_ret)
+label(fl_div)
+label(fl_delta)
+label(fl_base)
+registersymbol(flick)
+registersymbol(fl_div)
+registersymbol(fl_delta)
+registersymbol(fl_base)
+
+flick:
+Flick:
+ mov eax,[MarySkelter2.exe+D05428]
+ and eax,000003FF
+ xor edx,edx
+ div dword ptr [fl_div]
+ and eax,00000001
+ cvtsi2ss xmm3,eax
+ mulss xmm3,[fl_delta]
+ addss xmm3,[fl_base]
+ mov rax,[MarySkelter2.exe+A6CEB0]
+ test rax,rax
+ je fl_ret
+ mov rcx,[rax+40]
+ test rcx,rcx
+ je fl_ret
+ movss [rcx+00000434],xmm3
+ sub rsp,28
+ call "MarySkelter2.exe"+BCA00
+ add rsp,28
+fl_ret:
+ ret
+
+fl_div:
+ dd 00000001
+fl_delta:
+ dd (float)0.25
+fl_base:
+ dd (float)0.0
+
+"MarySkelter2.exe"+BD760:
+ jmp Flick
+
+[DISABLE]
+"MarySkelter2.exe"+BD760:
+ db 48 8B 05 49 F7 9A 00 48 8B 48 40 F3 0F 11 81 34 04 00 00 C3
+
+unregistersymbol(fl_base)
+unregistersymbol(fl_delta)
+unregistersymbol(fl_div)
+unregistersymbol(flick)
+</AssemblerScript>
     </CheatEntry>
   </CheatEntries>
   <CheatCodes>

@@ -164,11 +164,21 @@ add_library(EnigmaFix SHARED
         Source/Settings/PlayerSettings.h
         Source/Plugins/Plugin_DERQ.cpp
         Source/Plugins/Plugin_DERQ.h
+        Source/Plugins/Plugin_DERQ2.cpp
+        Source/Plugins/Plugin_DERQ2.h
+        Source/Plugins/Plugin_Varnir.cpp
+        Source/Plugins/Plugin_Varnir.h
+        Source/Plugins/Plugin_NVS.cpp
+        Source/Plugins/Plugin_NVS.h
+        Source/Plugins/PatchSite.cpp
+        Source/Plugins/PatchSite.h
         Source/Utilities/UITextureLoader.cpp
         Source/Utilities/UITextureLoader.h
         Source/Utilities/DXHelper.h
         Source/Utilities/DXEnums.h
         Source/Utilities/MemoryHelper.cpp
+        Source/Utilities/CrashHandler.cpp
+        Source/Utilities/CrashHandler.h
         Source/Managers/LogManager.cpp
         Source/Managers/LogManager.h
         Source/Utilities/DisplayHelper.h
@@ -198,7 +208,7 @@ endif()
 ## Add the dependencies we set up previously.
 # NOTE: Add "" to the "add_dependencies" section when you finally get that shit working.
 add_dependencies(EnigmaFix imgui kiero safetyhook inipp nlohmann_json spdlog minhook)
-target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog minhook)
+target_link_libraries(EnigmaFix PRIVATE d3dcompiler imgui kiero safetyhook inipp nlohmann_json spdlog minhook psapi)
 #target_link_libraries(EnigmaFix d3dcompiler imgui kiero inipp ${Boost_LIBRARIES})
 ## Set up our linker flags for compiling.
 if(MINGW)

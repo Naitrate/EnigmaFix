@@ -47,7 +47,14 @@ _deps
 # Project GitIgnores
 Intermediate/Debug
 Intermediate/Release
-.idea
 .vs
 Build_Log.txt
 result
+
+# Do not exclude the cmake settings for CLion, but exclude everything else.
+!.idea/cmake.xml
+.idea/EnigmaFix.iml
+.idea/editor.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml

@@ -49,14 +49,10 @@ ID3D11RenderTargetView* mainRenderTargetView;
 //// Various PlayerSettings and Localization String Accessors
 auto& PlayerSettingsRm      = EnigmaFix::PlayerSettings::Get();
 auto& LocalizationRm        = EnigmaFix::Localization::Get();
-bool UseCustomRes           = PlayerSettingsRm.RES.UseCustomRes;
-int HorizontalRes           = PlayerSettingsRm.RES.Resolution.x;
-int VerticalRes             = PlayerSettingsRm.RES.Resolution.y;
-bool UseResolutionScale     = PlayerSettingsRm.RES.UseCustomResScale;
-int ResolutionScale         = PlayerSettingsRm.RES.CustomResScale;
-int* InternalHorizontalRes   = &PlayerSettingsRm.INS.InternalResolution.x;
-int* InternalVerticalRes     = &PlayerSettingsRm.INS.InternalResolution.y;
-int ScreenSpaceEffectsScale = PlayerSettingsRm.RS.ScreenSpaceEffectsDivider;
+// These two stay pointers so they track PlayerSettings live. Anything else read out of PlayerSettings here would be a
+// copy taken at DLL load, before the config is read, so the rest of the settings are read at their point of use.
+int* InternalHorizontalRes  = &PlayerSettingsRm.INS.InternalResolution.x;
+int* InternalVerticalRes    = &PlayerSettingsRm.INS.InternalResolution.y;
 //// Hook Init Check
 bool InitHook               = false;
 // Namespaces
@@ -123,13 +119,51 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         return DefWindowProc(hWnd, uMsg, wParam, lParam);  // Fallback if oWndProc is invalid
 }
 
+// Identifies the CopyDeferredColor_Hist target, whose size is the game's actual internal rendering resolution.
+//
+// A 16 bit float target carrying a full mip chain used to be enough, but plenty of unrelated resources match that: a
+// 1024x1024 cube face has exactly 11 mips, the same as a 1080p target, and latching onto one sets the internal
+// resolution to 1024x1024 and sends every downstream resize to the wrong size. Requiring a non-square, landscape,
+// plausibly screen sized surface whose mip count really is the full chain for its dimensions rejects those.
+bool LooksLikeInternalResolutionTarget(const D3D11_TEXTURE2D_DESC* pDesc)
+{
+    if (pDesc->Format != DXGI_FORMAT_R16G16B16A16_FLOAT) { return false; }
+    if (pDesc->Width == pDesc->Height) { return false; }  // No display is square.
+    if (pDesc->Width < pDesc->Height)  { return false; }  // Nor is one taller than it is wide.
+    if (pDesc->Width < 640 || pDesc->Height < 360) { return false; }
+
+    UINT fullMipChain = 1;
+    for (UINT dimension = pDesc->Width; dimension > 1; dimension >>= 1) { ++fullMipChain; }
+    if (pDesc->MipLevels != fullMipChain) { return false; }  // 11 at 1920x1080, 12 at 3440x1440.
+
+    // The shape tests above are not enough on their own. During startup the engine creates a 1280x720 target that is
+    // landscape, large enough, and carries a genuine 11 entry mip chain, so it satisfies every one of them -- and
+    // latching onto it sets the internal resolution to 1280x720 until the real target shows up a second later. Every
+    // render target created in that window then gets sized against the wrong resolution. Requiring the dimensions to
+    // match the resolution actually being asked for removes the ambiguity entirely.
+    if (PlayerSettingsRm.RES.UseCustomRes) {
+        return pDesc->Width  == static_cast<UINT>(PlayerSettingsRm.RES.Resolution.x)
+            && pDesc->Height == static_cast<UINT>(PlayerSettingsRm.RES.Resolution.y);
+    }
+    return true;
+}
+
 // An easily callable function to make the CreateTexture2D hook a little cleaner.
-void resizeRt(D3D11_TEXTURE2D_DESC *pDesc, int Width, int Height, int DesiredWidth, int DesiredHeight)
+// Returns whether it actually resized anything, so callers can log the match rather than logging on every candidate
+// texture. The previous logging sat outside this check and reported things like "changing resolution from 1x1 to
+// 1920x1080" for targets it never touched.
+bool resizeRt(D3D11_TEXTURE2D_DESC *pDesc, int Width, int Height, int DesiredWidth, int DesiredHeight)
 {
     if (pDesc->Width == Width && pDesc->Height == Height) {
+        if (DesiredWidth <= 0 || DesiredHeight <= 0) {
+            spdlog::error("Refusing to resize a {}x{} target to {}x{}.", Width, Height, DesiredWidth, DesiredHeight);
+            return false;
+        }
         pDesc->Width  = static_cast<UINT>(DesiredWidth);
         pDesc->Height = static_cast<UINT>(DesiredHeight);
+        return true;
     }
+    return false;
 }
 
 // Resizes constant buffers
@@ -371,17 +405,44 @@ void cbPatchMizuchiCopyback(ID3D11DeviceContext* pContext)
     memcpy(bufData.data(), stageMap.pData, 160);
     pContext->Unmap(stagingBuffer, 0);
 
-    // Verify gWorld[0][0] == 1920 and gWorld[1][1] == 1080 before patching
-    // to avoid stomping unrelated 160-byte buffers
-    float* gWorld = reinterpret_cast<float*>(bufData.data()); // offset 0
-    if (gWorld[0] != 1920.0f || gWorld[5] != 1080.0f) {
-        vsBuffer->Release();
-        return;
-    }
+    // $Globals here is gWorld(16) + gProjection(16) + gUVOffsetAndSize(4) + gColor(4) floats.
+    //
+    // gWorld scales the fullscreen quad in source pixels, and gProjection converts those pixels to NDC using the
+    // destination size: its diagonal is 2/destWidth and -2/destHeight. When the two disagree the quad overshoots the
+    // viewport and the blit shows a magnified top-left crop of the source instead of the whole thing.
+    //
+    // That is exactly what happens once the scene is rendered above 1080p: RenderDoc measured gWorld at 3440x1440 (the
+    // source) against a gProjection built for 1920x1080 (the destination), putting the quad's far corner at NDC
+    // (2.583, -1.667) instead of (1, -1), so only 2.0/3.583 = 55.8% by 2.0/2.667 = 75% of the image survives. In stock
+    // 1080p both sides are 1920x1080, the scale works out to 1.0 and the bug never appears.
+    //
+    // The destination is whatever gProjection says it is, so gWorld is brought into line with it rather than the other
+    // way round. An earlier version of this forced gWorld up to the internal resolution, which is the direction that
+    // causes the crop; it only ever looked harmless because the engine had already written the source size there.
+    float* gWorld      = reinterpret_cast<float*>(bufData.data());       // offset 0
+    float* gProjection = reinterpret_cast<float*>(bufData.data()) + 16;  // offset 64
 
-    // Patch the scale components
-    gWorld[0] = static_cast<float>(*InternalHorizontalRes);
-    gWorld[5] = static_cast<float>(*InternalVerticalRes);
+    if (gProjection[0] == 0.0f || gProjection[5] == 0.0f) { vsBuffer->Release(); return; }
+
+    const float destWidth  =  2.0f / gProjection[0];
+    const float destHeight = -2.0f / gProjection[5];
+    if (destWidth <= 0.0f || destHeight <= 0.0f) { vsBuffer->Release(); return; }
+
+    // Already consistent, or not the quad we are looking for.
+    if (gWorld[0] == destWidth && gWorld[5] == destHeight) { vsBuffer->Release(); return; }
+    if (gWorld[0] <= 0.0f || gWorld[5] <= 0.0f) { vsBuffer->Release(); return; }
+
+    static bool loggedFixup = false;
+    if (!loggedFixup) {
+        spdlog::info("Fullscreen blit fixup: quad was {}x{} against a {}x{} destination ({:.1f}% x {:.1f}% of the "
+                     "image was visible). Rescaling the quad to match.", gWorld[0], gWorld[5], destWidth, destHeight,
+                     100.0f * destWidth / gWorld[0], 100.0f * destHeight / gWorld[5]);
+        loggedFixup = true;
+    }
+    gWorld[0] = destWidth;
+    gWorld[5] = destHeight;
+
+    // gWorld has already been brought into line with gProjection above.
 
     // Write back via dynamic patch buffer
     static ID3D11Buffer* patchBuffer = nullptr;
@@ -411,202 +472,264 @@ void cbPatchMizuchiCopyback(ID3D11DeviceContext* pContext)
     vsBuffer->Release();
 }
 
-bool vpResize(ID3D11DeviceContext* pContext)
+// The post processing chain derives every one of its viewport and scissor sizes from a hardcoded 1920x1080, so this
+// set of sizes is what identifies one as belonging to it. Matching on the size rather than on the shape of the draw
+// call is what lets unrelated viewports (UI, shadow passes, the main scene) pass through untouched.
+bool IsHardcodedPostProcessSize(const UINT width, const UINT height)
 {
-    if (PlayerSettingsRm.RES.UseCustomRes) {
-        UINT numViewports = 0;
-        pContext->RSGetViewports(&numViewports, nullptr);
-        if (numViewports == 1) {
-            D3D11_VIEWPORT vp = {};
-            pContext->RSGetViewports(&numViewports, &vp);
-            // This is where we can call each viewport that needs to be resized.
-            // Since the post-process pipeline is hardcoded to 1080p, I think we can get away with murder when it comes to viewport resizing.
-            if ((vp.Width == 1920.0f && vp.Height == 1080.0f) ||
-                (vp.Width ==  960.0f && vp.Height ==  540.0f) ||
-                (vp.Width ==  640.0f && vp.Height ==  360.0f) || // Previously commented out
-                (vp.Width ==  480.0f && vp.Height ==  270.0f) ||
-                (vp.Width ==  384.0f && vp.Height ==  216.0f) ||
-                (vp.Width ==  320.0f && vp.Height ==  180.0f) ||
-                (vp.Width ==  240.0f && vp.Height ==  135.0f) ||
-                (vp.Width ==  192.0f && vp.Height ==  108.0f) ||
-                (vp.Width ==  160.0f && vp.Height ==   90.0f) || // Previously commented out
-                (vp.Width ==   96.0f && vp.Height ==   54.0f) ||
-                (vp.Width ==   80.0f && vp.Height ==   46.0f) || // Previously commented out
-                (vp.Width ==   48.0f && vp.Height ==   28.0f) ||
-                (vp.Width ==   48.0f && vp.Height ==   27.0f) ||
-                (vp.Width ==   40.0f && vp.Height ==   24.0f) || // Previously commented out
-                (vp.Width ==   24.0f && vp.Height ==   14.0f) ||
-                (vp.Width ==   20.0f && vp.Height ==   12.0f) || // Previously commented out
-                (vp.Width ==   12.0f && vp.Height ==    8.0f) ||
-                (vp.Width ==   12.0f && vp.Height ==    7.0f) ||
-                (vp.Width ==   10.0f && vp.Height ==    6.0f) || // Previously commented out
-                (vp.Width ==    6.0f && vp.Height ==    4.0f)) {
-                spdlog::info("Found viewport with size {}x{}.", vp.Width, vp.Height);
-                ID3D11RenderTargetView *rtView = nullptr;
-                pContext->OMGetRenderTargets(1, &rtView, nullptr);
-                if (rtView) {
-                    D3D11_RENDER_TARGET_VIEW_DESC desc;
-                    rtView->GetDesc(&desc);
-                    if (desc.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
-                        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT    ||
-                        desc.Format == DXGI_FORMAT_R11G11B10_FLOAT       ||
-                        desc.Format == DXGI_FORMAT_R24G8_TYPELESS        ||
-                        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM        ||
-                        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
-                        spdlog::info("Found viewport with type {}.", DXGIFormatToString(desc.Format));
-                        ID3D11Resource *rt = nullptr;
-                        rtView->GetResource(&rt);
-                        if (rt != nullptr) {
-                            ID3D11Texture2D *rttex = nullptr;
-                            rt->QueryInterface<ID3D11Texture2D>(&rttex);
-                            if (rttex != nullptr) {
-                                D3D11_TEXTURE2D_DESC texdesc = {};
-                                rttex->GetDesc(&texdesc);
-                                spdlog::info("texdesc.Width={} vp.Width={}", texdesc.Width, vp.Width);
-                                if (static_cast<float>(texdesc.Width) != vp.Width) {
-                                    // Here we go!
-                                    // Viewport is the easy part
-                                    vp.Width = static_cast<FLOAT>(texdesc.Width);
-                                    vp.Height = static_cast<FLOAT>(texdesc.Height);
-                                    spdlog::info("Attempting viewport resize from {}x{} to {}x{}", vp.Width, vp.Height, texdesc.Width, texdesc.Height);
-                                    pContext->RSSetViewports(1, &vp);
-                                    spdlog::info("Set viewport to size {}x{}.", vp.Width, vp.Height);
-                                    //cbResize(pContext, desc, texdesc, vp); // We should run the constant buffer modification right after viewport resizing.
-                                    rttex->Release();   // release before returning
-                                    rt->Release();
-                                    rtView->Release();
-                                    return true;
-                                }
-                                rttex->Release();
-                            }
-                            rt->Release(); // always release rt if it was non-null
-                        }
-                        else { spdlog::error("Viewport Resource returned null."); }
-                    }
-                }
-            }
-        }
+    static constexpr struct { UINT Width; UINT Height; } sizes[] = {
+        { 1920, 1080 }, { 960, 540 }, { 640, 360 }, { 480, 270 }, { 384, 216 },
+        {  320,  180 }, { 240, 135 }, { 192, 108 }, { 160,  90 }, {  96,  54 },
+        {   80,   46 }, {  48,  28 }, {  48,  27 }, {  40,  24 }, {  24,  14 },
+        {   20,   12 }, {  12,   8 }, {  12,   7 }, {  10,   6 }, {   6,   4 },
+    };
+    for (const auto& size : sizes) {
+        if (size.Width == width && size.Height == height) { return true; }
     }
     return false;
 }
 
-bool srResize(ID3D11DeviceContext* pContext)
+// Formats the post processing chain renders into. Anything else is left alone.
+bool IsPostProcessFormat(const DXGI_FORMAT format)
 {
-    if (PlayerSettingsRm.RES.UseCustomRes) {
-        // This is where scissor rect resizing will occur.
-        UINT numRects = 0;
-        pContext->RSGetScissorRects(&numRects, nullptr);
-        if (numRects == 1) {
-            D3D11_RECT rect = {};
-            pContext->RSGetScissorRects(&numRects, &rect);
-            if ((rect.right ==   1920 && rect.bottom ==  1080)  ||
-                (rect.right ==    960 && rect.bottom ==   540)  ||
-                (rect.right ==    640 && rect.bottom ==   360)  || // Previously commented out
-                (rect.right ==    480 && rect.bottom ==   270)  ||
-                (rect.right ==    384 && rect.bottom ==   216)  ||
-                (rect.right ==    320 && rect.bottom ==   180)  ||
-                (rect.right ==    240 && rect.bottom ==   135)  ||
-                (rect.right ==    192 && rect.bottom ==   108)  ||
-                (rect.right ==    160 && rect.bottom ==    90)  || // Previously commented out
-                (rect.right ==     96 && rect.bottom ==    54)  ||
-                (rect.right ==     80 && rect.bottom ==    46)  || // Previously commented out
-                (rect.right ==     48 && rect.bottom ==    28)  ||
-                (rect.right ==     48 && rect.bottom ==    27)  ||
-                (rect.right ==     40 && rect.bottom ==    24)  || // Previously commented out
-                (rect.right ==     24 && rect.bottom ==    14)  ||
-                (rect.right ==     20 && rect.bottom ==    12)  || // Previously commented out
-                (rect.right ==     12 && rect.bottom ==     8)  ||
-                (rect.right ==     12 && rect.bottom ==     7)  ||
-                (rect.right ==     10 && rect.bottom ==     6)  || // Previously commented out
-                (rect.right ==      6 && rect.bottom ==     4)) {
-                spdlog::info("Found scissor rect with size {}x{}.", rect.right, rect.bottom);
-                ID3D11RenderTargetView *rtView = nullptr;
-                pContext->OMGetRenderTargets(1, &rtView, nullptr);
-                if (rtView) {
-                    D3D11_RENDER_TARGET_VIEW_DESC desc;
-                    rtView->GetDesc(&desc);
-                    if (desc.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
-                        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT    ||
-                        desc.Format == DXGI_FORMAT_R11G11B10_FLOAT       ||
-                        desc.Format == DXGI_FORMAT_R24G8_TYPELESS        ||
-                        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM        ||
-                        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
-                        spdlog::info("Found scissor rect with type {}.", DXGIFormatToString(desc.Format));
-                        ID3D11Resource *rt = nullptr;
-                        rtView->GetResource(&rt);
-                        if (rt != nullptr) {
-                            ID3D11Texture2D *rttex = nullptr;
-                            rt->QueryInterface<ID3D11Texture2D>(&rttex);
-                            if (rttex != nullptr) {
-                                D3D11_TEXTURE2D_DESC texdesc = {};
-                                rttex->GetDesc(&texdesc);
-                                spdlog::info("texdesc.Width={} rect.Right={}", texdesc.Width, rect.right);
-                                if (static_cast<float>(texdesc.Width) != rect.right) {
-                                    // Here we go!
-                                    // Viewport is the easy part
-                                    rect.right = static_cast<LONG>(texdesc.Width);
-                                    rect.bottom = static_cast<LONG>(texdesc.Height);
-                                    pContext->RSSetScissorRects(1, &rect);
-                                    spdlog::info("Set scissor rect to size {}x{}.", rect.right, rect.bottom);
-                                    rttex->Release();
-                                    rt->Release();
-                                    rtView->Release();
-                                    return true;
-                                }
-                                rttex->Release();
-                            }
-                            rt->Release(); // always release rt if it was non-null
-                        }
-                        else { spdlog::error("Scissor Rect Resource returned null."); }
-                    }
-                }
-            }
-        }
+    switch (format) {
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R11G11B10_FLOAT:
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        // The three below are the main scene GBuffer targets, and they were missing: a capture shows R16G16_SNORM with
+        // 185 draws, R16G16B16A16_UNORM with 147 and R8G8B8A8_SRGB with 147, none of which were being matched. So the
+        // whole opaque pass was rendering at whatever viewport the engine set, while only the post processing chain got
+        // corrected.
+        case DXGI_FORMAT_R16G16_SNORM:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return true;
+        default:
+            return false;
     }
-    return false;
+}
+
+// Describes the texture behind the currently bound render target. Every COM reference taken here is released here,
+// which the previous inline version of this got wrong: it only released the render target view on the one path where
+// it actually resized something, so every other exit leaked a reference and pinned stale render targets alive.
+bool GetBoundRenderTargetDesc(ID3D11DeviceContext* pContext, D3D11_TEXTURE2D_DESC& outTexDesc, DXGI_FORMAT& outViewFormat)
+{
+    ID3D11RenderTargetView* rtView = nullptr;
+    pContext->OMGetRenderTargets(1, &rtView, nullptr);
+    if (rtView == nullptr) { return false; }
+
+    D3D11_RENDER_TARGET_VIEW_DESC viewDesc = {};
+    rtView->GetDesc(&viewDesc);
+    outViewFormat = viewDesc.Format;
+
+    ID3D11Resource* rt = nullptr;
+    rtView->GetResource(&rt);
+    rtView->Release();
+    if (rt == nullptr) { return false; }
+
+    ID3D11Texture2D* rtTex = nullptr;
+    const HRESULT hr = rt->QueryInterface<ID3D11Texture2D>(&rtTex);
+    rt->Release();
+    if (FAILED(hr) || rtTex == nullptr) { return false; }
+
+    rtTex->GetDesc(&outTexDesc);
+    rtTex->Release();
+    return true;
+}
+
+// Remembers which resize transitions have already been reported, so the per draw logging below stays at one line per
+// distinct "AxB -> CxD" instead of one line per draw call.
+bool ShouldLogResize(const UINT fromW, const UINT fromH, const UINT toW, const UINT toH)
+{
+    static std::map<uint64_t, bool> seen;
+    const uint64_t key = (static_cast<uint64_t>(fromW) << 48) | (static_cast<uint64_t>(fromH) << 32)
+                       | (static_cast<uint64_t>(toW)   << 16) |  static_cast<uint64_t>(toH);
+    if (seen.find(key) != seen.cend()) { return false; }
+    seen[key] = true;
+    return true;
+}
+
+// Death end re;Quest caches its render size in a struct reached through a pointer at Application.exe+0x1339380, at
+// +0x40 (width) and +0x44 (height). The engine leaves it at 1920x1080 no matter what resolution is actually in use.
+//
+// That matters because the YEBIS composite builds its fullscreen quad's texture coordinates on the CPU as
+// cachedSize / textureSize. At 3440x1440 that gives 1920/3440 = 0.5581 and 1080/1440 = 0.75, so the composite samples
+// only the top-left 55.8% by 75% of the scene and stretches it over the whole screen. Measured directly off the
+// vertex data: TEXCOORD0 runs 0 to 1.116279 across a fullscreen triangle, which is 0.5581 across the visible half.
+// At 1920x1080 the ratio is exactly 1.0, which is why this only ever appeared above 1080p and looked independent of
+// aspect ratio.
+//
+// Refreshed every frame rather than patched once, because the engine rewrites the struct on resolution changes.
+void RefreshCachedRenderSize()
+{
+    if (PlayerSettingsRm.GameMode != EnigmaFix::PlayerSettings::DERQ) { return; }
+    if (!PlayerSettingsRm.RES.UseCustomRes) { return; }
+    if (*InternalHorizontalRes <= 0 || *InternalVerticalRes <= 0) { return; }
+
+    const auto baseModule = reinterpret_cast<uintptr_t>(GetModuleHandleA("Application.exe"));
+    if (baseModule == 0) { return; }
+
+    const auto slot = reinterpret_cast<uintptr_t*>(baseModule + 0x1339380);
+    if (IsBadReadPtr(slot, sizeof(uintptr_t))) { return; }
+
+    const uintptr_t cachedSize = *slot;
+    if (cachedSize == 0) { return; }  // Not constructed yet; it appears during camera setup.
+
+    auto* width  = reinterpret_cast<int*>(cachedSize + 0x40);
+    if (IsBadWritePtr(width, sizeof(int) * 2)) { return; }
+    auto* height = reinterpret_cast<int*>(cachedSize + 0x44);
+
+    if (*width == *InternalHorizontalRes && *height == *InternalVerticalRes) { return; }
+
+    static bool loggedRefresh = false;
+    if (!loggedRefresh) {
+        spdlog::info("Cached render size was {}x{} while rendering at {}x{}. Correcting it so the post processing "
+                     "composite stops sampling only part of the scene.", *width, *height,
+                     *InternalHorizontalRes, *InternalVerticalRes);
+        loggedRefresh = true;
+    }
+    *width  = *InternalHorizontalRes;
+    *height = *InternalVerticalRes;
+}
+
+// Corrects the viewport and scissor rect for the post processing chain, which the engine leaves hardcoded at 1920x1080
+// no matter how large the render target actually is.
+//
+// This used to be reached only for draws with 3, 4 or 6 indices, on the assumption that every post process pass is a
+// fullscreen quad. The composite pass responsible for the pause menu background and the camera transitions is a mesh
+// draw with thousands of indices (see Notes/Rendering/Render Targets.md), so it never matched and its viewport stayed
+// at 1080p. The mismatch between the viewport and its render target is itself the signal, so no draw call filtering is
+// needed: the size and format checks below already pick out the passes that need correcting.
+bool ResizePostProcessRasterizerState(ID3D11DeviceContext* pContext)
+{
+    if (!PlayerSettingsRm.RES.UseCustomRes) { return false; }
+
+    UINT numViewports = 0;
+    pContext->RSGetViewports(&numViewports, nullptr);
+    if (numViewports != 1) { return false; }
+
+    D3D11_VIEWPORT vp = {};
+    pContext->RSGetViewports(&numViewports, &vp);
+
+    // The viewport check comes first and on its own, because it rejects the overwhelming majority of draws. Querying
+    // the scissor rect for all ~750 draws in a frame as well was pure overhead on every one that was never a
+    // candidate. Anything the post processing chain touches sets both to the same hardcoded size, so a viewport that
+    // does not match means the scissor will not either.
+    if (!IsHardcodedPostProcessSize(static_cast<UINT>(vp.Width), static_cast<UINT>(vp.Height))) { return false; }
+
+    UINT numRects = 0;
+    pContext->RSGetScissorRects(&numRects, nullptr);
+    D3D11_RECT rect = {};
+    const bool hasScissor = (numRects == 1);
+    if (hasScissor) { pContext->RSGetScissorRects(&numRects, &rect); }
+
+    constexpr bool viewportMatches = true;
+    const bool scissorMatches = hasScissor && IsHardcodedPostProcessSize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
+
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
+    if (!GetBoundRenderTargetDesc(pContext, texDesc, viewFormat)) { return false; }
+    if (!IsPostProcessFormat(viewFormat)) { return false; }
+
+    bool changed = false;
+
+    if (viewportMatches && static_cast<float>(texDesc.Width) != vp.Width) {
+        // Logged once per distinct transition rather than per draw. This runs on every draw in the frame, and writing
+        // a few hundred lines a second to a file sink and a console window was costing real frame time.
+        if (ShouldLogResize(static_cast<UINT>(vp.Width), static_cast<UINT>(vp.Height), texDesc.Width, texDesc.Height)) {
+            spdlog::info("Resizing {} viewport from {}x{} to {}x{}.", DXGIFormatToString(viewFormat),
+                         static_cast<UINT>(vp.Width), static_cast<UINT>(vp.Height), texDesc.Width, texDesc.Height);
+        }
+        vp.Width  = static_cast<FLOAT>(texDesc.Width);
+        vp.Height = static_cast<FLOAT>(texDesc.Height);
+        pContext->RSSetViewports(1, &vp);
+        changed = true;
+    }
+
+    if (scissorMatches && static_cast<LONG>(texDesc.Width) != rect.right) {
+        if (ShouldLogResize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), texDesc.Width, texDesc.Height)) {
+            spdlog::info("Resizing {} scissor rect from {}x{} to {}x{}.", DXGIFormatToString(viewFormat),
+                         rect.right, rect.bottom, texDesc.Width, texDesc.Height);
+        }
+        rect.right  = static_cast<LONG>(texDesc.Width);
+        rect.bottom = static_cast<LONG>(texDesc.Height);
+        pContext->RSSetScissorRects(1, &rect);
+        changed = true;
+    }
+
+    return changed;
 }
 
 namespace EnigmaFix {
     // A hook that contains the needed logic to resize the framebuffer whenever the game resolution changes.
     HRESULT __stdcall RenderManager::hkResizeBuffers(IDXGISwapChain *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags)
     {
-        if (mainRenderTargetView) {
+        // pDevice, pContext and mainRenderTargetView are only ever assigned inside hkPresent's one time init block, but
+        // this hook is on a different vtable entry and the game resizes the swap chain during its startup resolution
+        // change -- before the first Present has happened. Everything below therefore has to tolerate being called
+        // with none of it set up yet, which is what was crashing: a call through a null device vtable slot.
+        if (rm_Instance.oResizeBuffers == nullptr) {
+            spdlog::critical("ResizeBuffers: The original function was never bound, so the resize cannot be forwarded.");
+            return DXGI_ERROR_INVALID_CALL;
+        }
+
+        if (pContext != nullptr && mainRenderTargetView != nullptr) {
             pContext->OMSetRenderTargets(0, 0, 0);
-            mainRenderTargetView->Release(); // WE DON'T NEED TO SET THE RTVIEW TO NULL AFTER RELEASING IT, GPT!
+            mainRenderTargetView->Release();
+            mainRenderTargetView = nullptr;  // Otherwise the release below runs on a dangling pointer.
         }
 
-        // TODO: Potentially investigate why oResizeBuffers isn't working.
-        // I have a theory that it might be the rm_Instance.original functions that are causing problems.
-        HRESULT hr = rm_Instance.oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-        
+        const HRESULT hr = rm_Instance.oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+        // Nothing to rebuild against until Present has handed us a device. The next Present creates the view anyway.
+        if (pDevice == nullptr || pContext == nullptr) {
+            spdlog::info("ResizeBuffers: Ran before the device was captured, so the render target view will be rebuilt on the next Present.");
+            return hr;
+        }
+
         ID3D11Texture2D* pBuffer = nullptr;
-        hr = pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBuffer);
-        if (SUCCEEDED(hr)) {
-            if (mainRenderTargetView) {
-                mainRenderTargetView->Release(); // WE DON'T NEED TO SET THE MRTVIEW TO NULL AFTER RELEASING IT, GPT!
-            }
-            DX::ThrowIfFailed(pDevice->CreateRenderTargetView(pBuffer, nullptr, &mainRenderTargetView));
-            pBuffer->Release(); // Release the reference acquired by GetBuffer
+        // Throwing out of a hook unwinds through the game's own frames, which is undefined behaviour across the COM
+        // boundary and takes the process down just as surely as the crash did. These report and return instead.
+        if (const HRESULT bufferHr = pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pBuffer));
+            FAILED(bufferHr) || pBuffer == nullptr) {
+            spdlog::error("ResizeBuffers: Failed to get the swap chain back buffer (0x{:08X}).", static_cast<unsigned>(bufferHr));
+            return hr;
         }
-        else { throw std::runtime_error("Failed to create render target view."); } // Throw a standard C++ exception with an error message.
 
-        pContext->OMSetRenderTargets(1, &mainRenderTargetView, nullptr);
+        if (mainRenderTargetView != nullptr) {
+            mainRenderTargetView->Release();
+            mainRenderTargetView = nullptr;
+        }
+        if (const HRESULT viewHr = pDevice->CreateRenderTargetView(pBuffer, nullptr, &mainRenderTargetView); FAILED(viewHr)) {
+            spdlog::error("ResizeBuffers: Failed to create the render target view (0x{:08X}).", static_cast<unsigned>(viewHr));
+            mainRenderTargetView = nullptr;
+        }
+        pBuffer->Release(); // Release the reference acquired by GetBuffer
 
-        // Set up the viewport.
-        D3D11_VIEWPORT vp;
-        vp.Width    = static_cast<float>(Width);
-        vp.Height   = static_cast<float>(Height);
-        vp.MinDepth = 0.0f;
-        vp.MaxDepth = 1.0f;
-        vp.TopLeftX = 0.0f;
-        vp.TopLeftY = 0.0f;
-        pContext->RSSetViewports(1, &vp); //how to check if any boolean is equal to true
+        if (mainRenderTargetView != nullptr) {
+            pContext->OMSetRenderTargets(1, &mainRenderTargetView, nullptr);
+
+            // Set up the viewport.
+            D3D11_VIEWPORT vp;
+            vp.Width    = static_cast<float>(Width);
+            vp.Height   = static_cast<float>(Height);
+            vp.MinDepth = 0.0f;
+            vp.MaxDepth = 1.0f;
+            vp.TopLeftX = 0.0f;
+            vp.TopLeftY = 0.0f;
+            pContext->RSSetViewports(1, &vp);
+        }
         return hr;
     }
 
     // A hook that contains the needed logic for adding the imgui interface, and forcing flip model presentation.
     HRESULT __stdcall RenderManager::hkPresent(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags) // Here's what happens when the swapchain is ready to be presented.
     {
+        if (rm_Instance.oPresent == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
+
         if (!InitHook) { // Checks if the hook hasn't been initialized, and if not, does the needed deeds to hook ImGui.
             HRESULT hr = pSwapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&pDevice));
             if (SUCCEEDED(hr))
@@ -623,15 +746,19 @@ namespace EnigmaFix {
                     pDevice->CreateRenderTargetView(pBackBuffer, NULL, &mainRenderTargetView);
                     pBackBuffer->Release();
                 }
-                else { throw std::runtime_error("Failed to get swapchain back buffer."); } // Throw a standard C++ exception with an error message.
+                else { spdlog::error("Present: Failed to get the swap chain back buffer."); }
                 oWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
                 InitImGui();
                 InitHook = true;
             }
-            else { throw std::runtime_error("Failed to get swapchain device."); }
+            else { spdlog::error("Present: Failed to get the swap chain device."); }
         }
 
         // TODO: Implement developer console and find a way to pipe SpdLog and standard logging to it.
+        // RefreshCachedRenderSize() is deliberately not called. Forcing that struct to the real resolution made the
+        // final output letterbox with black bars without fixing the crop, so it clearly feeds more than the composite's
+        // texture coordinates. Kept in the file because the value it corrects is still the best lead we have.
+
         PlayerSettingsRm.ShowUI = PlayerSettingsRm.ShowEFUI || PlayerSettingsRm.ShowDevConsole; // Checks if either EFUI or the dev console are enabled, and if so, enable the showUI flag.
 
         if (PlayerSettingsRm.ShowUI) { // Checks if the showUI flag is enabled, and if so, draws the ImGui interface.
@@ -655,12 +782,18 @@ namespace EnigmaFix {
         }
 
         UINT syncInterval = PlayerSettingsRm.SYNC.VSync ? PlayerSettingsRm.SYNC.SyncInterval : 0; // Converts the vSync checks to a quick variable to clean up space.
-        return rm_Instance.oPresent(pSwapChain, syncInterval, static_cast<UINT>(DXGI_SWAP_EFFECT_FLIP_DISCARD) | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        // Flags has to be a combination of DXGI_PRESENT_*. This previously passed a swap effect ORed with a swap chain
+        // creation flag, which works out to DXGI_PRESENT_RESTART plus an undefined bit, every single frame. Neither the
+        // swap effect nor the tearing flag can be changed at present time: both are fixed when the game creates the
+        // swap chain. The game's own flags are forwarded instead, so only the sync interval is overridden.
+        return rm_Instance.oPresent(pSwapChain, syncInterval, Flags);
     }
 
     // A hook that contains the needed logic for changing the Shadow, SSR, SSAO, and Post Processing resolution.
     HRESULT __stdcall RenderManager::hkCreateTexture2D(ID3D11Device* pDevice, D3D11_TEXTURE2D_DESC* pDesc, D3D11_SUBRESOURCE_DATA* pInitialData, ID3D11Texture2D** ppTexture2D)
     {
+        if (rm_Instance.oCreateTexture2D == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
+
         // Update our rendering settings related settings before we modify anything.
         int ShadowRes = PlayerSettingsRm.RS.ShadowRes;
         int ScreenSpaceEffectsScale = PlayerSettingsRm.RS.ScreenSpaceEffectsDivider;
@@ -669,10 +802,14 @@ namespace EnigmaFix {
         int iH = *InternalVerticalRes;
 
         // Checks to see if a render target is the current texture resource first before doing anything with it.
-        if (pDesc->BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) {
+        // This tests the bits rather than comparing the whole field: a render target that also carries another bind
+        // flag (an unordered access view, for instance) is still a render target, and an exact comparison silently
+        // skipped every one of those.
+        constexpr UINT renderTargetBindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        if ((pDesc->BindFlags & renderTargetBindFlags) == renderTargetBindFlags) {
             // We are simply using this to update our current internal resolution for the rest of the logic.
             // Checks for the specific texture format for CopyDeferredColor_Hist, and checks to see if it has twelve mipmaps, if so, we got our suspect render target. 11 only works with resolutions below 1440p, while 12 only works with anything higher than 1080p.
-            if (pDesc->Format == DXGI_FORMAT_R16G16B16A16_FLOAT && (pDesc->MipLevels == 11 || pDesc->MipLevels == 12)) { // Checks to see if it has twelve mipmaps, if so, we got our suspect render target. 11 only works with resolutions below 1440p, while 12 only works with anything higher than 1080p.
+            if (LooksLikeInternalResolutionTarget(pDesc)) {
                 if (pDesc->Width != *InternalHorizontalRes || pDesc->Height != *InternalVerticalRes) {
                     iW = pDesc->Width;
                     iH = pDesc->Height;
@@ -730,6 +867,18 @@ namespace EnigmaFix {
             // TODO: Figure out how to grab the yebismizuchi2 set of calls using the ID3DUserDefinedAnnotation system, so we can more accurately adjust these.
             // TODO: We need to find a way to get this so it can work with resolutions lower than 1920x1080 too, because it will still glitch out with resolutions lower than that.
             if (PlayerSettingsRm.RES.UseCustomRes) {
+                // The resizes below are all relative to the detected internal resolution, which only becomes correct
+                // once the 11/12 mip render target above has been seen. If a post processing target is created before
+                // that happens, the internal resolution is still its 1920x1080 default and every resize here is a
+                // silent no-op, so say so rather than leaving it to be worked out from a black screen.
+                static bool warnedAboutDetectionOrder = false;
+                if (!warnedAboutDetectionOrder && *InternalHorizontalRes == 1920 && *InternalVerticalRes == 1080
+                    && (pDesc->Width != 1920 || pDesc->Height != 1080)) {
+                    spdlog::warn("Internal resolution is still at its 1920x1080 default while creating a {}x{} target. "
+                                 "If the game is not actually running at 1080p, resolution detection has not run yet "
+                                 "and these resizes will do nothing.", pDesc->Width, pDesc->Height);
+                    warnedAboutDetectionOrder = true;
+                }
                 if (pDesc->MipLevels == 1) {
                 // if (*InternalHorizontalRes != 1920 || *InternalVerticalRes != 1080) { // Unsure if the InternalHorizontalRes > 1080 will cause a problem.
                     switch (pDesc->Format) {
@@ -760,14 +909,15 @@ namespace EnigmaFix {
                     }
                     case DXGI_FORMAT_B8G8R8A8_UNORM: {
                         // The pause menu background effect that occurs after the "mizuchi-copyback" tagged drawcall.
-                        spdlog::info("Found Pause Menu Background Render Target (After 'mizuchi-copyback'). Changing resolution from {}x{} to {}x{}.", pDesc->Width, pDesc->Height, iW, iH);
-                        resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes);
+                        if (resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes)) {
+                            spdlog::info("Resized Pause Menu Background Render Target (After 'mizuchi-copyback') from 1920x1080 to {}x{}.", pDesc->Width, pDesc->Height);
+                        }
                         break;
                     }
-                    // TODO: Fix this. It's not running.
                     case DXGI_FORMAT_R8G8B8A8_UNORM: { // The pause menu background effect that occurs after "yebismizuchi" tagged drawcalls.
-                        spdlog::info("Found Pause Menu Background Render Target (After 'yebismizuchi'). Changing resolution from from {}x{} to {}x{}.", pDesc->Width, pDesc->Height, iW, iH);
-                        resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes);
+                        if (resizeRt(pDesc, 1920, 1080, *InternalHorizontalRes, *InternalVerticalRes)) {
+                            spdlog::info("Resized Pause Menu Background Render Target (After 'yebismizuchi') from 1920x1080 to {}x{}.", pDesc->Width, pDesc->Height);
+                        }
                         break;
                     }
                     default: { break; }
@@ -775,7 +925,8 @@ namespace EnigmaFix {
                 }
             }
         }
-        if (pDesc->BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL)) {
+        constexpr UINT depthStencilBindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
+        if ((pDesc->BindFlags & depthStencilBindFlags) == depthStencilBindFlags) {
             if (PlayerSettingsRm.RS.ShadowRes != 2048) {
                 switch (pDesc->Format) { // For some weird reason, this switch statement won't detect SSAO or Screen Space Reflections unless I prioritize them.
                 case DXGI_FORMAT_R32_TYPELESS: { // This checks for the R32_TYPELESS format which is used for shadows
@@ -793,11 +944,35 @@ namespace EnigmaFix {
     // A hook that contains the needed logic for running checks on Viewports and Scissor Rects.
     HRESULT __stdcall RenderManager::hkDrawIndexed(ID3D11DeviceContext* pContext, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
     {
-        //if ((IndexCount == 3 || IndexCount == 4 || IndexCount == 6) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
+        // Runs on every draw. The composite pass that needs correcting is a mesh draw with thousands of indices, so the
+        // old "3, 4 or 6 indices" filter skipped the one call that mattered. The size and format checks inside do the
+        // selecting instead, and the cheap viewport check runs before any render target lookup.
+        if (rm_Instance.oDrawIndexed == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
+
+        ResizePostProcessRasterizerState(pContext);
+
+        // The YEBIS constant buffer patch does stay filtered. It targets the fullscreen passes specifically, and it
+        // reads the constant buffer back from the GPU, which is far too expensive to do on every draw.
         if ((IndexCount == 3 || IndexCount == 4 || IndexCount == 6) && StartIndexLocation == 0 && BaseVertexLocation == 0) {
-            vpResize(pContext);
-            srResize(pContext);
+            // cbPatchYebis is deliberately not called. It scaled the YEBIS UV transform matrices by
+            // internalRes/1920 x internalRes/1080, on the assumption that they were authored for 1080p and needed
+            // widening. They are not: the engine already builds them for the real resolution, so the extra scale made
+            // the composite sample only 1/1.79 = 55.8% by 1/1.33 = 75.0% of its source and blow that up to full
+            // screen. Those are exactly the crop fractions measured from captures, and the scale is 1.0 at 1920x1080,
+            // which is why the crop only ever appeared above 1080p and looked aspect-independent.
+            //
+            // Verified by bisecting a 3440x1440 capture: the scene going in (6862) and the chain's own intermediate
+            // (8682) are both framed correctly, and only the composite that this patched (EID 6988 -> 6855) came out
+            // cropped.
+            // Restored. Disabling it made the crop visibly worse, which shows it is acting as a partial compensation
+            // rather than the cause: it scales am44_TransformMatrix by 1.79167 x 1.33333, the exact reciprocal of the
+            // 0.5581 x 0.75 sampled fraction measured off the composite's vertex data. Wrong constant, right
+            // magnitude. Leave it until the texture coordinates themselves can be corrected at source.
             cbPatchYebis(pContext);
+            // The composite immediately after the "yebismizuchi2" marker samples the finished post processing result
+            // through a 160 byte $Globals whose gWorld still describes a 1920x1080 quad, which is what crops the image
+            // down to a corner. This was written for exactly that draw and had never been called.
+            cbPatchMizuchiCopyback(pContext);
         }
         return rm_Instance.oDrawIndexed(pContext, IndexCount, StartIndexLocation, BaseVertexLocation);
     }
@@ -805,10 +980,9 @@ namespace EnigmaFix {
     // Another hook that contains the needed logic for running checks on Viewports and Scissor Rects.
     HRESULT __stdcall RenderManager::hkDraw(ID3D11DeviceContext* pContext, UINT VertexCount, UINT StartVertexLocation)
     {
-        if ((VertexCount == 3 || VertexCount == 4) && StartVertexLocation == 0) {
-            vpResize(pContext);
-            srResize(pContext);
-        }
+        if (rm_Instance.oDraw == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
+
+        ResizePostProcessRasterizerState(pContext);
         return rm_Instance.oDraw(pContext, VertexCount, StartVertexLocation);
     }
 

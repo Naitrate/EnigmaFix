@@ -27,6 +27,7 @@ SOFTWARE.
 #include "../Managers/PatchManager.h"
 
 // Third Party Libraries
+#include <algorithm>
 #include <codecvt>
 #include <safetyhook.hpp>
 
@@ -44,15 +45,22 @@ EnigmaFix::Plugin_DERQ EnigmaFix::Plugin_DERQ::pq_Instance; // Seemingly need th
 namespace EnigmaFix
 {
 
+    // Only the offsets are stored. The previous version resolved them against PatchManagerPDQ.BaseModule inside a
+    // constructor, but this array lives at namespace scope, so that ran during static initialisation -- before
+    // PatchManager::InitPatch() had assigned BaseModule at all. Every pointer ended up as nullptr + 0xF587xx, which
+    // reads back as zero, and ResCheckFunctionHook then wrote 0x0 into the game's live internal resolution.
     struct ResolutionPtr {
-        int* X;
-        int* Y;
+        intptr_t XOffset;
+        intptr_t YOffset;
 
-        // Constructor that takes offsets and calculates addresses dynamically
-        ResolutionPtr(intptr_t xOffset, intptr_t yOffset) {
-            intptr_t baseModule = reinterpret_cast<intptr_t>(PatchManagerPDQ.BaseModule);
-            X = reinterpret_cast<int*>(baseModule + xOffset);
-            Y = reinterpret_cast<int*>(baseModule + yOffset);
+        [[nodiscard]] int* X() const { return Resolve(XOffset); }
+        [[nodiscard]] int* Y() const { return Resolve(YOffset); }
+
+    private:
+        [[nodiscard]] static int* Resolve(const intptr_t offset) {
+            const auto baseModule = reinterpret_cast<intptr_t>(PatchManagerPDQ.BaseModule);
+            if (baseModule == 0) { return nullptr; }
+            return reinterpret_cast<int*>(baseModule + offset);
         }
     };
 
@@ -83,6 +91,36 @@ namespace EnigmaFix
             }
             spdlog::info("Patched {} bytes of {} with NOPs.", nopsCount, patternName);
         }
+        else { spdlog::error("{} signature was not found.", patternName); }
+    }
+
+    // Scans for a string literal and NOPs it out. The CE table uses this to skip movies: the engine treats a path it can't resolve as nothing to play.
+    void NOPString(HMODULE baseModule, const std::string& text, const std::string& patternName)
+    {
+        constexpr char hexDigits[] = "0123456789ABCDEF";
+        std::string pattern;
+        pattern.reserve(text.size() * 3);
+        for (const unsigned char character : text) {
+            if (!pattern.empty()) { pattern.push_back(' '); }
+            pattern.push_back(hexDigits[character >> 4]);
+            pattern.push_back(hexDigits[character & 0x0F]);
+        }
+        NOPPattern(baseModule, pattern, text.size(), patternName);
+    }
+
+    // Shutter ratio and max blur length pairs for each motion blur preset. The engine's own defaults are 0.67542696 and 0.1, which the "Medium" preset keeps.
+    struct MotionBlurValues { float ShutterRatio; float MaxBlurLength; };
+    constexpr MotionBlurValues motionBlurPresets[] = {
+        { 0.0f,        0.0f  }, // Disabled (still runs the pass, so motion vectors stay available)
+        { 0.33771348f, 0.05f }, // Short
+        { 0.67542696f, 0.10f }, // Medium
+        { 1.0f,        0.20f }, // Long
+    };
+
+    const MotionBlurValues& CurrentMotionBlurPreset()
+    {
+        const int preset = std::clamp(PlayerSettingsPDQ.RS.MotionBlurPreset, 0, static_cast<int>(std::size(motionBlurPresets)) - 1);
+        return motionBlurPresets[preset];
     }
 
     using ResCheckFunctionType = void(*)(char*, int, int);
@@ -113,12 +151,22 @@ namespace EnigmaFix
         // Grab the current resolution index, so we can adjust the memory value for the internal resolution below the 4K Native mode to their proper resolutions.
         auto currentResolutionIndexPtr = reinterpret_cast<int*>(*reinterpret_cast<intptr_t*>(reinterpret_cast<intptr_t>(PatchManagerPDQ.BaseModule) + 0x01017E18) + 0xC4);
         if (int currentResolutionIndex = *currentResolutionIndexPtr; currentResolutionIndex >= 0 && currentResolutionIndex <= 11) {
-            if (hResPtr != nullptr && vResPtr != nullptr) {
-                Memory::Write(reinterpret_cast<uintptr_t>(hResPtr), *resolutionList[currentResolutionIndex].X);
-                Memory::Write(reinterpret_cast<uintptr_t>(vResPtr), *resolutionList[currentResolutionIndex].Y);
+            const int* listX = resolutionList[currentResolutionIndex].X();
+            const int* listY = resolutionList[currentResolutionIndex].Y();
+            if (hResPtr == nullptr || vResPtr == nullptr || listX == nullptr || listY == nullptr) {
+                spdlog::error("Resolution: Horizontal and Vertical Res Pointers came back as null pointers.");
+            }
+            // Writing a zero or negative size here hands the engine a 0x0 back buffer and takes the process down with
+            // it, so refuse rather than trust whatever the table read back.
+            else if (*listX <= 0 || *listY <= 0) {
+                spdlog::error("Resolution: Resolution list entry {} read back as {}x{}, which is not usable. Leaving "
+                              "the internal resolution at {}x{}.", currentResolutionIndex, *listX, *listY, *hResPtr, *vResPtr);
+            }
+            else {
+                Memory::Write(reinterpret_cast<uintptr_t>(hResPtr), *listX);
+                Memory::Write(reinterpret_cast<uintptr_t>(vResPtr), *listY);
                 spdlog::info("Resolution: Patched Internal 1080p Resolution to {}x{}.", *hResPtr, *vResPtr);
             }
-            else { spdlog::error("Resolution: Horizontal and Vertical Res Pointers came back as null pointers."); }
         }
         else {
             // TODO: Figure out why writing to the internal resolution and window size causes crashing.
@@ -216,6 +264,30 @@ namespace EnigmaFix
         //NOPPattern(baseModule, "F3 0F ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 66 0F", 3, "Aspect Ratio Change Blocker Opcode 3"); // (F3 0F 11 4F 50)
         //NOPPattern(baseModule, "8B 42 ?? 89 41 ?? 0F 10 ?? ?? 0F 11 ?? ?? 0F 10 ?? ?? 0F 11 ?? ?? 0F 10 ?? ?? 0F 11 ?? ?? 8B 82", 3, "Aspect Ratio Change Blocker Opcode 4");// (8B 42 50)
 
+        // "Application.exe"+6E2753: movss [rdi+50],xmm1
+        //
+        // Ghidra shows the containing function (+6E26A0) as the camera initialiser. It writes the aspect field at
+        // +0x50 twice, and the second write is the one that sticks:
+        //
+        //     iVar2 = *(int *)(DAT_7ff6cd7f9380 + 0x40);                 // window width
+        //     iVar1 = *(int *)(DAT_7ff6cd7f9380 + 0x44);                 // window height
+        //     *(float *)(param_1 + 0x50) = (float)iVar2 / (float)iVar1;  // aspect = w / h
+        //
+        // So the camera's aspect comes from a global window size pair, not from the render target. Resizing the render
+        // targets to 21:9 while that pair still reads 16:9 leaves the projection at 16:9, which crops the view to a
+        // zoomed corner. Overriding xmm1 just before the store hands the camera the aspect we are actually rendering
+        // at. The old approach of NOPing these writes could not work: it leaves whatever was in the field before.
+        if (auto aspectRatioWriteFunc = Memory::PatternScan(baseModule, "F3 0F ?? ?? ?? E8 ?? ?? ?? ?? 85 C0 75")) {
+            spdlog::info("Aspect Ratio: Found Camera Aspect Ratio Write at: {}", reinterpret_cast<void*>(aspectRatioWriteFunc));
+            static SafetyHookMid aspectRatioMidHook{};
+            aspectRatioMidHook = safetyhook::create_mid(aspectRatioWriteFunc,
+                [](SafetyHookContext& ctx) {
+                    const float aspect = PlayerSettingsPDQ.RES.InternalAspectRatio;
+                    if (aspect > 0.0f) { ctx.xmm1.f32[0] = aspect; }
+                });
+        }
+        else { spdlog::error("Aspect Ratio: Camera Aspect Ratio Write signature was not found."); }
+
         // TODO: Figure out what opcodes access these memory pointers, and update them to use our own internal aspect ratio variable.
         // Set up the pointer addresses for our aspect ratio variables
 
@@ -261,12 +333,72 @@ namespace EnigmaFix
 
     void Plugin_DERQ::FOVPatches(HMODULE baseModule)
     {
+        if (!PlayerSettingsPDQ.FOV.UseCustomFOV) { return; }
 
+        // "Application.exe"+6E1F6F: movss [rcx+000004C4],xmm0
+        // This is the main write to the FOV value during regular gameplay. The CE table replaces the store with a hardcoded float, but overwriting xmm0 beforehand lets the game's own store carry our value, so the FOV can be retuned at runtime.
+        if (auto fovWriteFunc = Memory::PatternScan(baseModule, "F3 0F ?? ?? ?? ?? ?? ?? 48 83 C4 ?? C3 CC CC CC CC 48 8B")) {
+            spdlog::info("FOV: Found FOV Write Signature at: {}", reinterpret_cast<void*>(fovWriteFunc));
+            static SafetyHookMid fovWriteMidHook{};
+            fovWriteMidHook = safetyhook::create_mid(fovWriteFunc,
+                [](SafetyHookContext& ctx) {
+                    ctx.xmm0.f32[0] = static_cast<float>(PlayerSettingsPDQ.FOV.FieldOfView);
+                });
+        }
+        else { spdlog::error("FOV: FOV Write Signature was not found."); }
+
+        // "Application.exe"+6E17FF: movss xmm0,[rcx+000004C4]
+        // The battle camera reads the FOV back out rather than writing it, so this one has to seed the value in memory before the load happens.
+        if (auto battleFovFunc = Memory::PatternScan(baseModule, "F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? 0F 28")) {
+            spdlog::info("FOV: Found Battle FOV Signature at: {}", reinterpret_cast<void*>(battleFovFunc));
+            static SafetyHookMid battleFovMidHook{};
+            battleFovMidHook = safetyhook::create_mid(battleFovFunc,
+                [](SafetyHookContext& ctx) {
+                    if (ctx.rcx) { *reinterpret_cast<float*>(ctx.rcx + 0x4C4) = static_cast<float>(PlayerSettingsPDQ.FOV.FieldOfView); }
+                });
+        }
+        else { spdlog::error("FOV: Battle FOV Signature was not found."); }
+
+        // Unpausing copies a fixed 45 degree FOV back over the value, which would undo the hook above, so both of those writes get removed.
+        // "Application.exe"+6E2741: mov [rdi+44],(float)45.0 (C7 47 44 00 00 34 42)
+        NOPPattern(baseModule, "C7 47 44 ?? ?? ?? ?? C7 47 48 ?? ?? ?? ?? F3 0F", 7, "FOV Unpause Restore 1");
+        // "Application.exe"+6DDBA5: mov [rcx+44],eax (89 41 44)
+        NOPPattern(baseModule, "89 41 ?? 8B 42 ?? 89 41 ?? 8B 42 ?? 89 41 ?? 8B 42 ?? 89 41 ?? 0F 10 ?? ?? 0F 11 ?? ?? 0F 10 ?? ?? 0F 11 ?? ?? 0F 10", 3, "FOV Unpause Restore 2");
+
+        // "Application.exe"+6E1A6B: movss [rcx+000004C4],xmm0
+        // This one drives both the battle FOV and in-engine cutscenes. The battle hook above already covers battles, and NOPing it leaves cutscenes stuck at whatever FOV was last set, so it stays off by default.
+        //NOPPattern(baseModule, "F3 0F ?? ?? ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC CC CC CC 48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? F3 0F ?? ?? ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC CC CC CC 48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? F3 0F ?? ?? ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC CC CC CC 48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? F3 0F ?? ?? ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC CC CC CC 48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? F3 0F ?? ?? ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC CC CC CC CC 83 F9", 8, "FOV Battle and Cutscene Write");
     }
 
     void Plugin_DERQ::UIPatches(HMODULE baseModule)
     {
+        if (PlayerSettingsPDQ.MS.SkipOpeningVideos) {
+            // Blanking the paths is enough to skip these: the engine moves on when the movie can't be resolved. The ending ("game_ed_") and event ("game_ev_") movies are deliberately left alone, as are the notice screens, which live in SYSTEM/WARN and aren't movies.
+            for (const auto& openingVideo : {
+                "../../resource/finalizedWin64/MOVIE/game_op.usm",
+                "../../resource/finalizedWin64/MOVIE/game_op_jp.usm",
+                "../../resource/finalizedWin64/MOVIE/game_op_ch.usm",
+                "../../resource/finalizedWin64/MOVIE/game_op_%03u.usm",
+                "../../resource/finalizedWin64/MOVIE/logo_if.usm",
+                "../../resource/finalizedWin64/MOVIE/logo_ch.usm",
+                "../../resource/finalizedWin64/MOVIE/logo_silicon.usm",
+                "../../resource/finalizedWin64/MOVIE/logo_silicon_en.usm",
+            }) {
+                NOPString(baseModule, openingVideo, std::string("Opening Video Path (") + openingVideo + ")");
+            }
+        }
 
+        // "Application.exe"+486674: call qword ptr [...] / cmp eax,02
+        // The call puts up the "really quit?" message box and the compare checks for its confirm result. Dropping the call and comparing against 1 instead of 2 takes the quit path straight away.
+        if (auto altF4PromptFunc = Memory::PatternScan(baseModule, "FF 15 ?? ?? ?? ?? 83 F8 ?? 0F 85")) {
+            spdlog::info("UI: Found Alt+F4 Prompt Signature at: {}", reinterpret_cast<void*>(altF4PromptFunc));
+            for (size_t i = 0; i < 6; ++i) {
+                Memory::Write(reinterpret_cast<uintptr_t>(altF4PromptFunc + i), static_cast<uint8_t>(0x90));
+            }
+            Memory::Write(reinterpret_cast<uintptr_t>(altF4PromptFunc + 8), static_cast<uint8_t>(0x01));
+            spdlog::info("UI: Disabled the Alt+F4 confirmation prompt.");
+        }
+        else { spdlog::error("UI: Alt+F4 Prompt Signature was not found."); }
     }
 
     //void __attribute__((naked)) FramerateUnlockHook() {
@@ -381,10 +513,13 @@ namespace EnigmaFix
             }
         }
 
-        if (PlayerSettingsPDQ.RS.RLRLighting) {
-            // Disable IBL Lighting:
-            // E8 ?? ?? ?? ?? 49 8B ?? E8 ?? ?? ?? ?? 48 8D ?? ?? 4C 89 (Application.exe+2981AD - E8 8E AE FF FF - call Application.exe+293040) This needs to have a switch statement that checks things before running it.
+        if (!PlayerSettingsPDQ.RS.IBL) {
+            // "Application.exe"+2981AD: call Application.exe+293040
+            // Dropping the call is what disables image based lighting. It only takes effect on the next time the lighting is set up, so it needs a pause/unpause or an area change to show up.
+            NOPPattern(baseModule, "E8 ?? ?? ?? ?? 49 8B ?? E8 ?? ?? ?? ?? 48 8D ?? ?? 4C 89", 5, "IBL Lighting Call");
+        }
 
+        if (PlayerSettingsPDQ.RS.RLRLighting) {
             // In the post processing settings
             if (auto rlrLightingToggleFunc = Memory::PatternScan(baseModule, "42 88 ?? ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 49 69 C7 ?? ?? ?? ?? 0F 28 ?? 0F 28 ?? F3 41 ?? ?? ?? ?? ?? ?? ?? F3 42 ?? ?? ?? ?? ?? ?? ?? ?? F3 0F ?? ?? F3 42 ?? ?? ?? ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 49 69 C7 ?? ?? ?? ?? 0F 28 ?? 0F 28 ?? F3 41 ?? ?? ?? ?? ?? ?? ?? F3 42 ?? ?? ?? ?? ?? ?? ?? ?? F3 0F ?? ?? F3 42 ?? ?? ?? ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D")) { // "Application.exe"+29D3DF: mov [rcx+r13+000001C4],al (42 88 84 29 C4 01 00 00)
                 spdlog::info("Post Processing: Found RLR Lighting Signature at: {}", reinterpret_cast<void*>(rlrLightingToggleFunc));
@@ -407,13 +542,28 @@ namespace EnigmaFix
             if (auto motionBlurToggleFunc = Memory::PatternScan(baseModule, "42 88 ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 41 8B")) { // "Application.exe"+29CFF3: mov [rcx+r13+58],al (42 88 44 29 58)
                 spdlog::info("Post Processing: Found Motion Blur Signature at: {}", reinterpret_cast<void*>(motionBlurToggleFunc));
             }
-            //switch (PlayerSettingsPDQ.RS.MotionBlurPreset) {
-                //case 0:  // Disabled, will probably keep this around for motion vectors
-                //case 1:  // Short
-                //case 2:  // Medium
-                //case 3:  // Long
-                //default: // Shutter Ratio (Application.exe+7735D8, default: 0.67542696) and Max Blur Length (Application.exe+25EE50, default: 0.1000000015)
-            //}
+            // The settings menu writes both of these out of xmm1, so overriding the register at the store points the preset at them without having to touch the engine's own default floats.
+            // "Application.exe"+29D056: movss [rax+r13+60],xmm1 (Shutter Ratio, default: 0.67542696)
+            if (auto shutterRatioFunc = Memory::PatternScan(baseModule, "F3 42 ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 49 69 C7 ?? ?? ?? ?? 0F 28 ?? 0F 28 ?? F3 41 ?? ?? ?? ?? ?? ?? ?? F3 42 ?? ?? ?? ?? ?? F3 0F ?? ?? F3 42 ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 41 0F")) {
+                spdlog::info("Post Processing: Found Motion Blur Shutter Ratio Signature at: {}", reinterpret_cast<void*>(shutterRatioFunc));
+                static SafetyHookMid shutterRatioMidHook{};
+                shutterRatioMidHook = safetyhook::create_mid(shutterRatioFunc,
+                    [](SafetyHookContext& ctx) {
+                        ctx.xmm1.f32[0] = CurrentMotionBlurPreset().ShutterRatio;
+                    });
+            }
+            else { spdlog::error("Post Processing: Motion Blur Shutter Ratio Signature was not found."); }
+
+            // "Application.exe"+29D093: movss [rax+r13+64],xmm1 (Max Blur Length, default: 0.1000000015)
+            if (auto maxBlurLengthFunc = Memory::PatternScan(baseModule, "F3 42 ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 41 0F ?? ?? ?? ?? ?? ?? 49 69 CF ?? ?? ?? ?? 42 88 ?? ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 66 41 ?? ?? ?? ?? ?? ?? ?? 49 69 CF ?? ?? ?? ?? 0F 5B ?? F3 0F ?? ?? 66 42 ?? ?? ?? ?? ?? ?? ?? ?? 0F 5B ?? F3 0F ?? ?? F3 0F ?? ?? F3 0F ?? ?? 42 89 ?? ?? ?? ?? ?? ?? 48 8D ?? ?? ?? 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 49 69 C7")) {
+                spdlog::info("Post Processing: Found Motion Blur Max Blur Length Signature at: {}", reinterpret_cast<void*>(maxBlurLengthFunc));
+                static SafetyHookMid maxBlurLengthMidHook{};
+                maxBlurLengthMidHook = safetyhook::create_mid(maxBlurLengthFunc,
+                    [](SafetyHookContext& ctx) {
+                        ctx.xmm1.f32[0] = CurrentMotionBlurPreset().MaxBlurLength;
+                    });
+            }
+            else { spdlog::error("Post Processing: Motion Blur Max Blur Length Signature was not found."); }
         }
 
         if (PlayerSettingsPDQ.RS.DepthOfField) {
@@ -451,7 +601,22 @@ namespace EnigmaFix
 
     void Plugin_DERQ::CameraPatches(HMODULE baseModule)
     {
+        if (!PlayerSettingsPDQ.MS.CameraTweaks) { return; }
 
+        // "Application.exe"+68F4C7: movss [rbx+00000198],xmm6 ... (43 bytes later) call Application.exe+6E1E20
+        // The store commits the clamped pitch back to the camera and the trailing call re-applies the clamp, so removing both frees up the vertical range. Everything between them is left intact.
+        // Both writes come off a single scan, because NOPing the store would otherwise destroy the pattern the second one is anchored on.
+        if (auto pitchClampFunc = Memory::PatternScan(baseModule, "F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? ?? ?? ?? ?? 44 0F ?? ?? 76 ?? F3 41")) {
+            spdlog::info("Camera: Found Pitch Clamp Signature at: {}", reinterpret_cast<void*>(pitchClampFunc));
+            for (size_t i = 0; i < 8; ++i) {  // movss [rbx+00000198],xmm6
+                Memory::Write(reinterpret_cast<uintptr_t>(pitchClampFunc + i), static_cast<uint8_t>(0x90));
+            }
+            for (size_t i = 0x2B; i < 0x2B + 5; ++i) {  // call Application.exe+6E1E20
+                Memory::Write(reinterpret_cast<uintptr_t>(pitchClampFunc + i), static_cast<uint8_t>(0x90));
+            }
+            spdlog::info("Camera: Unclamped the camera pitch range.");
+        }
+        else { spdlog::error("Camera: Pitch Clamp Signature was not found."); }
     }
 
     void Plugin_DERQ::PhotoModePatches(HMODULE baseModule)
