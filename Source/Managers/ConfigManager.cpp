@@ -28,6 +28,9 @@ SOFTWARE.
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <vector>
+#include <string>
+#include <cctype>
 // Third Party Libraries
 #include <inipp.h>
 #include <spdlog/spdlog.h>
@@ -51,55 +54,174 @@ namespace EnigmaFix {
     }
 
 
-    void ConfigManager::SaveConfig() { // TODO: Find a way of writing configs with IniPP.
+    namespace {
+        struct ConfigEntry {
+            const char* Section;
+            const char* Key;
+            std::string Value;
+        };
+
+        std::string FromBool(const bool value) { return value ? "true" : "false"; }
+        std::string FromInt(const int value)   { return std::to_string(value); }
+
+        std::string Trimmed(const std::string& text) {
+            const size_t first = text.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) { return {}; }
+            const size_t last = text.find_last_not_of(" \t\r\n");
+            return text.substr(first, last - first + 1);
+        }
+
+        bool EqualsNoCase(const std::string& a, const std::string& b) {
+            if (a.size() != b.size()) { return false; }
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // inipp parses fine but its generate() drops every comment, and Config.ini is mostly comments explaining what
+        // the options do. So saving rewrites the file in place instead: existing values are replaced on the lines they
+        // already occupy, and any key the file does not have yet is appended under its section. Comments, ordering and
+        // alignment all survive, and a hand-edited file stays hand-editable.
+        bool WriteConfigPreservingLayout(const std::string& path, const std::vector<ConfigEntry>& entries) {
+            std::vector<std::string> lines;
+            {
+                std::ifstream input(path);
+                if (!input) { return false; }
+                std::string line;
+                while (std::getline(input, line)) {
+                    if (!line.empty() && line.back() == '\r') { line.pop_back(); }
+                    lines.push_back(line);
+                }
+            }
+
+            std::vector<bool> written(entries.size(), false);
+            std::string       section;
+
+            // Pass one: replace values where the key already exists.
+            for (auto& line : lines) {
+                const std::string trimmed = Trimmed(line);
+                if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
+                    section = trimmed.substr(1, trimmed.size() - 2);
+                    continue;
+                }
+                if (trimmed.empty() || trimmed.rfind("//", 0) == 0 || trimmed.front() == ';' || trimmed.front() == '#') {
+                    continue;
+                }
+
+                const size_t equals = line.find('=');
+                if (equals == std::string::npos) { continue; }
+                const std::string key = Trimmed(line.substr(0, equals));
+
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (written[i]) { continue; }
+                    if (!EqualsNoCase(section, entries[i].Section) || !EqualsNoCase(key, entries[i].Key)) { continue; }
+                    // Keep everything left of the '=' exactly as the user had it, including any alignment padding.
+                    line = line.substr(0, equals + 1) + " " + entries[i].Value;
+                    written[i] = true;
+                    break;
+                }
+            }
+
+            // Pass two: append whatever the file did not already contain, after the last real line of its section so
+            // it lands inside the section rather than after a trailing blank line.
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (written[i]) { continue; }
+
+                int insertAt = -1;
+                std::string current;
+                for (size_t l = 0; l < lines.size(); ++l) {
+                    const std::string trimmed = Trimmed(lines[l]);
+                    if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
+                        current = trimmed.substr(1, trimmed.size() - 2);
+                        if (EqualsNoCase(current, entries[i].Section)) { insertAt = static_cast<int>(l); }
+                        continue;
+                    }
+                    if (EqualsNoCase(current, entries[i].Section) && !trimmed.empty()) { insertAt = static_cast<int>(l); }
+                }
+
+                const std::string entryLine = std::string(entries[i].Key) + " = " + entries[i].Value;
+                if (insertAt < 0) {
+                    lines.emplace_back("");
+                    lines.emplace_back("[" + std::string(entries[i].Section) + "]");
+                    lines.push_back(entryLine);
+                }
+                else {
+                    lines.insert(lines.begin() + insertAt + 1, entryLine);
+                }
+                written[i] = true;
+            }
+
+            std::ofstream output(path, std::ios::trunc);
+            if (!output) { return false; }
+            for (const auto& line : lines) { output << line << "\n"; }
+            return true;
+        }
+    }
+
+    void ConfigManager::SaveConfig() {
         if (AlreadyReadConfig) {
             spdlog::info("Saving Config...");
-            // Resolution Settings
-            //ini.WriteBoolean("Resolution",  "UseCustomResolution",       PlayerSettingsConf.RES.UseCustomRes,      0);
-            //ini.WriteInteger("Resolution",  "HorizontalResolution",      PlayerSettingsConf.RES.HorizontalRes,     0);
-            //ini.WriteInteger("Resolution",  "VerticalResolution",        PlayerSettingsConf.RES.VerticalRes,       0);
-            //ini.WriteBoolean("Resolution",  "UseResolutionScale",        PlayerSettingsConf.RES.UseCustomResScale, 0);
-            //ini.WriteInteger("Resolution",  "ResolutionScalePercentage", PlayerSettingsConf.RES.CustomResScale,    0);
-            // FOV Settings
-            //ini.WriteBoolean("FieldOfView", "UseCustomFOV",              PlayerSettingsConf.FOV.UseCustomFOV,      0);
-            //ini.WriteBoolean("FieldOfView", "UseVertPlusScaling",        PlayerSettingsConf.FOV.VertPlusScaling,   0);
-            //ini.WriteInteger("FieldOfView", "FieldOfView",               PlayerSettingsConf.FOV.FieldOfView,       0);
-            // Sync and Framerate Settings
-            //ini.WriteBoolean("Framerate",   "VSync",                     PlayerSettingsConf.SYNC.VSync,            0);
-            //ini.WriteInteger("Framerate",   "SyncInterval",              PlayerSettingsConf.SYNC.SyncInterval,     0);
-            //ini.WriteInteger("Framerate",   "MaxFPS",                    PlayerSettingsConf.SYNC.MaxFPS,           0);
-            // Rendering Settings
-            //ini.WriteBoolean("Rendering",   "CameraDistortion",          PlayerSettingsConf.RS.CameraDistortion,   0);
-            //ini.WriteBoolean("Rendering",   "EdgeRendering",             PlayerSettingsConf.RS.EdgeRendering,      0);
-            //ini.WriteBoolean("Rendering",   "ColorCorrection",           PlayerSettingsConf.RS.ColorCorrection,    0);
-            //ini.WriteBoolean("Rendering",   "DepthOfField",              PlayerSettingsConf.RS.DepthOfField,       0);
-            //ini.WriteBoolean("Rendering",   "Fog",                       PlayerSettingsConf.RS.Fog,                0);
-            //ini.WriteBoolean("Rendering",   "Foliage",                   PlayerSettingsConf.RS.FoliageRendering,   0);
-            //ini.WriteBoolean("Rendering",   "Bloom",                     PlayerSettingsConf.RS.Bloom,              0);
-            //ini.WriteBoolean("Rendering",   "IBL",                       PlayerSettingsConf.RS.IBL,                0);
-            //ini.WriteBoolean("Rendering",   "LensFlare",                 PlayerSettingsConf.RS.LensFlare,          0);
-            //ini.WriteBoolean("Rendering",   "MotionBlur",                PlayerSettingsConf.RS.MotionBlur,         0);
-            //ini.WriteInteger("Rendering",   "NotionBlurPreset",          PlayerSettingsConf.RS.MotionBlurPreset,   0);
-            //ini.WriteBoolean("Rendering",   "RLRLighting",               PlayerSettingsConf.RS.RLRLighting,        0);
-            //ini.WriteBoolean("Rendering",   "Shadows",                   PlayerSettingsConf.RS.Shadows,            0);
-            //// Add Shadow Quality here
-            //ini.WriteBoolean("Rendering",   "SSAO",                      PlayerSettingsConf.RS.SSAO,               0);
-            //// Add SSAO Quality here
-            //ini.WriteBoolean("Rendering",   "SSR",                       PlayerSettingsConf.RS.SSR,                0);
-            //// Add SSR Quality here
-            //ini.WriteBoolean("Rendering",   "TAA",                       PlayerSettingsConf.RS.TAA,                0);
-            //ini.WriteBoolean("Rendering",   "Tonemapping",               PlayerSettingsConf.RS.Tonemapping,        0);
-            //ini.WriteBoolean("Rendering",   "Vignette",                  PlayerSettingsConf.RS.Vignette,           0);
-            // Input Settings
-            //ini.WriteBoolean("Input",       "KBMPrompts",                PlayerSettingsConf.IS.KBMPrompts,         0);
-            //ini.WriteBoolean("Input",       "DisableSteamInput",         PlayerSettingsConf.IS.DisableSteamInput,  0);
-            //ini.WriteInteger("Input",       "InputType",                   PlayerSettingsConf.IS.InputDeviceType,    0);
-            // Misc Settings
-            //ini.WriteBoolean("Misc",        "SkipOpeningVideos",         PlayerSettingsConf.MS.SkipOpeningVideos,  0);
-            //ini.WriteBoolean("Misc",        "CameraTweaks",              PlayerSettingsConf.MS.CameraTweaks,       0);
-            //ini.WriteBoolean("Misc",        "EnableConsoleLog",          PlayerSettingsConf.MS.EnableConsoleLog,   0);
-            // Launcher Settings
-            //ini.WriteBoolean("Launcher",    "IgnoreUpdates",             PlayerSettingsConf.LS.IgnoreUpdates,      0);
+
+            const std::vector<ConfigEntry> entries = {
+                { "Resolution",  "UseCustomResolution",       FromBool(PlayerSettingsConf.RES.UseCustomRes) },
+                { "Resolution",  "HorizontalResolution",      FromInt(PlayerSettingsConf.RES.Resolution.x) },
+                { "Resolution",  "VerticalResolution",        FromInt(PlayerSettingsConf.RES.Resolution.y) },
+                { "Resolution",  "UseResolutionScale",        FromBool(PlayerSettingsConf.RES.UseCustomResScale) },
+                { "Resolution",  "ResolutionScalePercentage", FromInt(PlayerSettingsConf.RES.CustomResScale) },
+
+                { "FieldOfView", "UseCustomFOV",              FromBool(PlayerSettingsConf.FOV.UseCustomFOV) },
+                { "FieldOfView", "FieldOfView",               FromInt(PlayerSettingsConf.FOV.FieldOfView) },
+                { "FieldOfView", "UseAdaptiveFOVScaling",     FromBool(PlayerSettingsConf.FOV.AdaptiveFOVScaling) },
+
+                { "Framerate",   "MaxFPS",                    FromInt(PlayerSettingsConf.SYNC.MaxFPS) },
+                { "Framerate",   "VSync",                     FromBool(PlayerSettingsConf.SYNC.VSync) },
+                { "Framerate",   "SyncInterval",              FromInt(PlayerSettingsConf.SYNC.SyncInterval) },
+
+                { "Rendering",   "CameraDistortion",          FromBool(PlayerSettingsConf.RS.CameraDistortion) },
+                { "Rendering",   "EdgeRendering",             FromBool(PlayerSettingsConf.RS.EdgeRendering) },
+                { "Rendering",   "ColorCorrection",           FromBool(PlayerSettingsConf.RS.ColorCorrection) },
+                { "Rendering",   "DepthOfField",              FromBool(PlayerSettingsConf.RS.DepthOfField) },
+                { "Rendering",   "Fog",                       FromBool(PlayerSettingsConf.RS.Fog) },
+                { "Rendering",   "Foliage",                   FromBool(PlayerSettingsConf.RS.FoliageRendering) },
+                { "Rendering",   "Bloom",                     FromBool(PlayerSettingsConf.RS.Bloom) },
+                { "Rendering",   "IBL",                       FromBool(PlayerSettingsConf.RS.IBL) },
+                { "Rendering",   "LensFlare",                 FromBool(PlayerSettingsConf.RS.LensFlare) },
+                { "Rendering",   "MotionBlur",                FromBool(PlayerSettingsConf.RS.MotionBlur) },
+                { "Rendering",   "MotionBlurPreset",          FromInt(PlayerSettingsConf.RS.MotionBlurPreset) },
+                { "Rendering",   "RLRLighting",               FromBool(PlayerSettingsConf.RS.RLRLighting) },
+                { "Rendering",   "Shadows",                   FromBool(PlayerSettingsConf.RS.Shadows) },
+                { "Rendering",   "ShadowResolution",          FromInt(PlayerSettingsConf.RS.ShadowRes) },
+                { "Rendering",   "SSAO",                      FromBool(PlayerSettingsConf.RS.SSAO) },
+                { "Rendering",   "SSR",                       FromBool(PlayerSettingsConf.RS.SSR) },
+                { "Rendering",   "TAA",                       FromBool(PlayerSettingsConf.RS.TAA) },
+                { "Rendering",   "TAAJitter",                 FromBool(PlayerSettingsConf.RS.TAAJitter) },
+                { "Rendering",   "TAASharpness",              FromInt(PlayerSettingsConf.RS.TAASharpness) },
+                { "Rendering",   "TAAReplaceResolve",         FromBool(PlayerSettingsConf.RS.TAAReplaceResolve) },
+                { "Rendering",   "Tonemapping",               FromBool(PlayerSettingsConf.RS.Tonemapping) },
+                { "Rendering",   "Vignette",                  FromBool(PlayerSettingsConf.RS.Vignette) },
+
+                { "Input",       "KBMPrompts",                FromBool(PlayerSettingsConf.IS.KBMPrompts) },
+                { "Input",       "DisableSteamInput",         FromBool(PlayerSettingsConf.IS.DisableSteamInput) },
+
+                { "Misc",        "SkipOpeningVideos",         FromBool(PlayerSettingsConf.MS.SkipOpeningVideos) },
+                { "Misc",        "CameraTweaks",              FromBool(PlayerSettingsConf.MS.CameraTweaks) },
+                { "Misc",        "EnableConsoleLog",          FromBool(PlayerSettingsConf.MS.EnableConsoleLog) },
+
+                { "Launcher",    "IgnoreUpdates",             FromBool(PlayerSettingsConf.LS.IgnoreUpdates) },
+            };
+
+            if (WriteConfigPreservingLayout("Config.ini", entries)) {
+                spdlog::info("Saved {} settings to Config.ini.", entries.size());
+            }
+            else {
+                spdlog::error("Could not write Config.ini. Settings were not saved.");
+            }
+        }
+        else {
+            spdlog::warn("Refusing to save before the config has been read, which would write defaults over the file.");
         }
     }
 
@@ -111,7 +233,9 @@ namespace EnigmaFix {
         Init();
 
         // Resolution Settings
-        inipp::extract(config.sections["Resolution"]["useCustomResolution"], PlayerSettingsConf.RES.UseCustomRes);
+        // Capital U. inipp's section maps are case sensitive and the file has always written "UseCustomResolution", so
+        // the old lowercase spelling here never matched anything -- the setting silently kept its compiled-in default.
+        inipp::extract(config.sections["Resolution"]["UseCustomResolution"], PlayerSettingsConf.RES.UseCustomRes);
         inipp::extract(config.sections["Resolution"]["HorizontalResolution"], PlayerSettingsConf.RES.Resolution.x);
         inipp::extract(config.sections["Resolution"]["VerticalResolution"], PlayerSettingsConf.RES.Resolution.y);
         inipp::extract(config.sections["Resolution"]["UseResolutionScale"], PlayerSettingsConf.RES.UseCustomResScale);
@@ -146,6 +270,11 @@ namespace EnigmaFix {
         inipp::extract(config.sections["Rendering"]["SSR"], PlayerSettingsConf.RS.SSR);
         inipp::extract(config.sections["Rendering"]["SSRQuality"], ssrQuality);
         inipp::extract(config.sections["Rendering"]["TAA"], PlayerSettingsConf.RS.TAA);
+        inipp::extract(config.sections["Rendering"]["TAAJitter"], PlayerSettingsConf.RS.TAAJitter);
+        inipp::extract(config.sections["Rendering"]["TAASharpness"], PlayerSettingsConf.RS.TAASharpness);
+        // Read here rather than only set from the menu, because shaders are built once during startup: by the time the
+        // checkbox is reachable the resolve has already been created and the toggle cannot take effect until a restart.
+        inipp::extract(config.sections["Rendering"]["TAAReplaceResolve"], PlayerSettingsConf.RS.TAAReplaceResolve);
         inipp::extract(config.sections["Rendering"]["Tonemapping"], PlayerSettingsConf.RS.Tonemapping);
         inipp::extract(config.sections["Rendering"]["Vignette"], PlayerSettingsConf.RS.Vignette);
         // Input Settings
@@ -158,7 +287,10 @@ namespace EnigmaFix {
         inipp::extract(config.sections["Misc"]["CameraTweaks"], PlayerSettingsConf.MS.CameraTweaks);
         inipp::extract(config.sections["Misc"]["EnableConsoleLog"], PlayerSettingsConf.MS.EnableConsoleLog);
         string cpuSchedulerMode;
-        inipp::extract(config.sections["Misc"]["CPUSchedulerMode"], cpuSchedulerMode);
+        // The file spells this "CpuSchedulerMode"; the old "CPUSchedulerMode" spelling never matched. The value is
+        // still parsed into a local and dropped, same as SSAOQuality, SSRQuality and InputType above -- none of them
+        // have anywhere to go in PlayerSettings yet.
+        inipp::extract(config.sections["Misc"]["CpuSchedulerMode"], cpuSchedulerMode);
         // Launcher Settings
         inipp::extract(config.sections["Launcher"]["IgnoreUpdates"], PlayerSettingsConf.LS.IgnoreUpdates);
 
