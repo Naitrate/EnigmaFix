@@ -25,6 +25,7 @@ SOFTWARE.
 
 // System Libraries
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <directxmath.h>
 #include <dxgi.h>
 // Variables
@@ -57,6 +58,13 @@ namespace EnigmaFix {
         typedef HRESULT(__stdcall* RSSetViewports)(ID3D11DeviceContext *pContext, UINT NumViewports, const D3D11_VIEWPORT* pViewports);
         //// RSSetScissorRects Hook
         typedef HRESULT(__stdcall* RSSetScissorRects)(ID3D11DeviceContext *pContext, UINT NumRects, const D3D11_RECT* pRects);
+        //// Map / Unmap Hooks. These two are a pair: Map records where the game is about to write, Unmap reads back what
+        //// it wrote and corrects it before the write is handed to the driver. Unmap really does return void, unlike the
+        //// Draw typedefs above, so it is declared that way.
+        typedef HRESULT(__stdcall* Map)(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE *pMappedResource);
+        typedef void(__stdcall* Unmap)(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource);
+        //// CreatePixelShader Hook. Used to swap the engine's temporal AA resolve for our own.
+        typedef HRESULT(__stdcall* CreatePixelShader)(ID3D11Device *pDevice, const void *pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage *pClassLinkage, ID3D11PixelShader **ppPixelShader);
         // Render Hook Functions
         static HRESULT __stdcall hkResizeBuffers(IDXGISwapChain *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
         static HRESULT __stdcall hkPresent(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags);
@@ -65,6 +73,9 @@ namespace EnigmaFix {
         static HRESULT __stdcall hkDraw(ID3D11DeviceContext *pContext, UINT VertexCount, UINT StartVertexLocation);
         static HRESULT __stdcall hkRSSetViewports(ID3D11DeviceContext *pContext, UINT NumViewports, D3D11_VIEWPORT *pViewports);
         static HRESULT __stdcall hkRSSetScissorRects(ID3D11DeviceContext *pContext, UINT NumRects, D3D11_RECT *pRects);
+        static HRESULT __stdcall hkMap(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE *pMappedResource);
+        static void __stdcall hkUnmap(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource);
+        static HRESULT __stdcall hkCreatePixelShader(ID3D11Device *pDevice, const void *pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage *pClassLinkage, ID3D11PixelShader **ppPixelShader);
 
         // Variables
         //// D3D11Hook functions.
@@ -75,6 +86,9 @@ namespace EnigmaFix {
         DrawIndexed oDrawIndexed;
         RSSetViewports oRSSetViewports;
         RSSetScissorRects oRSSetScissorRects;
+        Map oMap;
+        Unmap oUnmap;
+        CreatePixelShader oCreatePixelShader;
     };
 }
 

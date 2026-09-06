@@ -390,7 +390,11 @@ namespace EnigmaFix {
         std::string rendering = std::string("\xef\x87\xbc ") + LocUI.Strings.collapsingHeader_Rendering;
         if (CollapsingHeader(rendering.c_str()), ImGuiTreeNodeFlags_Leaf)
         {
+            // Shadow quality below is real -- it drives the shadow render target resize in RenderManager. Turning
+            // shadows off entirely is not, since no plugin patches RS.Shadows, so only the checkbox is greyed out.
+            BeginDisabled();
             Checkbox(LocUI.Strings.checkbox_ShadowRendering.c_str(), &SettingsUI.RS.Shadows);
+            EndDisabled();
             if (SettingsUI.RS.Shadows) {
                 Combo(LocUI.Strings.combobox_ShadowQuality.c_str(), &SelectedShadowOption, ShadowOptions, IM_ARRAYSIZE(ShadowOptions));
                 SameLine();
@@ -399,7 +403,11 @@ namespace EnigmaFix {
             Checkbox(LocUI.Strings.checkbox_SSAO.c_str(), &SettingsUI.RS.SSAO);
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_SSAO.c_str());
+            // Greyed out because no plugin implements it yet. There is no Edge Rendering signature in Plugin_DERQ, so
+            // the checkbox moved a value nothing reads. Drop the BeginDisabled pair once a patch exists.
+            BeginDisabled();
             Checkbox(LocUI.Strings.checkbox_CharacterOutlines.c_str(), &SettingsUI.RS.EdgeRendering);
+            EndDisabled();
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_CharacterOutlines.c_str());
             Checkbox(LocUI.Strings.checkbox_GI.c_str(), &SettingsUI.RS.IBL);
@@ -411,7 +419,32 @@ namespace EnigmaFix {
             Checkbox(LocUI.Strings.checkbox_TAA.c_str(), &SettingsUI.RS.TAA);
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_TAA.c_str());
+            // Not localised yet, and deliberately plain text while this is being evaluated. Unlike the toggles above
+            // this one is genuinely live: the jitter is rewritten in the constant buffer every frame, so it can be
+            // switched on and off while looking at the same scene.
+            if (SettingsUI.RS.TAA) {
+                Checkbox("Temporal AA Jitter (experimental)", &SettingsUI.RS.TAAJitter);
+                SameLine();
+                HelpMarker("The engine runs its temporal AA without any subpixel jitter, so it blurs without ever "
+                           "resolving extra detail. This drives the jitter offset the shaders already read with an "
+                           "8 phase Halton sequence, which turns it into real temporal supersampling.");
+                Checkbox("Replace Temporal AA Resolve (restart)", &SettingsUI.RS.TAAReplaceResolve);
+                SameLine();
+                HelpMarker("Swaps the engine's temporal AA resolve for one with a Catmull-Rom history fetch and no "
+                           "centre-tap bypass, which is what makes the jitter and sharpness settings do anything at "
+                           "all. Shaders are only built once, so this needs a restart to take effect.");
+                if (SettingsUI.RS.TAAJitter) {
+                    SliderInt("Temporal AA Sharpness", &SettingsUI.RS.TAASharpness, 0, 100);
+                    SameLine();
+                    HelpMarker("Narrows the resolve's reconstruction filter. The engine's is a Gaussian of 0.534 "
+                               "pixels, which is wide once the jitter phases are accumulating. 0 keeps the engine's "
+                               "width; 100 narrows it to 0.6x. Push it too far and fine detail will start to sparkle.");
+                }
+            }
+            // Same as Character Outlines: no signature exists for foliage yet, so this one is greyed out too.
+            BeginDisabled();
             Checkbox(LocUI.Strings.checkbox_Foliage.c_str(), &SettingsUI.RS.FoliageRendering);
+            EndDisabled();
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_Foliage.c_str());
         }
@@ -438,8 +471,10 @@ namespace EnigmaFix {
     void UIManager::WindowButtons()
     {
         if (Button(LocUI.Strings.button_Save.c_str())) {
+            // Saving used to raise the startup notice as a stand-in while SaveConfig() was a stub that wrote nothing,
+            // so pressing Save appeared to do nothing except show the welcome prompt. SaveConfig() writes now, and the
+            // notice belongs to startup rather than to this button.
             ConManUI.SaveConfig();
-            startupNotice = true; // For now, this is tied to the save function for quick testing.
         }
         SameLine();
         if (Button(LocUI.Strings.button_About.c_str())) { aboutPage = true; }
