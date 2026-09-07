@@ -95,7 +95,7 @@ namespace EnigmaFix
             { "FOV Write (Gameplay)",  0x3D780F, "F3 0F 11 81 C4 04 00 00", "movss [rcx+000004C4],xmm0", "", PatchAction::NopBytes, 8 },
             { "FOV Write (Battle)",    0x3D718B, "F3 0F 11 81 C4 04 00 00", "movss [rcx+000004C4],xmm0", "", PatchAction::NopBytes, 8 },
             { "FOV Unpause Restore 1", 0x3D2135, "89 41 44",                "mov [rcx+44],eax",          "", PatchAction::NopBytes, 3 },
-            { "FOV Unpause Restore 2", 0x3D861F, "C7 47 44 00 00 34 42",    "mov [rdi+44],(float)45.0",  "", PatchAction::NopBytes, 7 },
+            { "FOV Unpause Restore 2", 0x3D861F, "C7 47 44 00 00 34 42", "mov [rdi+44],(float)45.0", "", PatchAction::NopBytes, 7 },  // Signature derived and unique, but deliberately left empty: the table applied all four FOV sites together, and NOPing this one alone would drop the unpause restore while the FOV writes still run.
         };
         ApplyPatchSites(baseModule, sites, "FOV");
 
@@ -117,7 +117,7 @@ namespace EnigmaFix
             { "UI Scale (Pause Menu 1)",   0x5E16F9, "F3 0F 2A 48 40",                "cvtsi2ss xmm1,[rax+40]",                  "", PatchAction::Document, 5 },
             { "UI Scale (Pause Menu 2)",   0x5E174C, "F3 0F 2A 48 40",                "cvtsi2ss xmm1,[rax+40]",                  "", PatchAction::Document, 5 },
             { "UI Scale (Affects FMVs)",   0x588E30, "8B 09 89 08 48 8B 44 24 28",    "mov ecx,[rcx] / mov [rax],ecx",           "", PatchAction::Document, 9 },
-            { "Minimap Scale",             0x382045, "F3 0F 10 35 D7 E3 B6 00",       "movss xmm6,[DeathEndReQuest2.exe+EF0424]","", PatchAction::Document, 8 },
+            { "Minimap Scale", 0x382045, "F3 0F 10 35 D7 E3 B6 00", "movss xmm6,[DeathEndReQuest2.exe+EF0424]", "F3 0F 10 35 D7 E3 B6 00", PatchAction::Document, 8 },
         };
         ApplyPatchSites(baseModule, sites, "UI");
     }
@@ -151,16 +151,16 @@ namespace EnigmaFix
         // Every toggle here is a "mov [r14+r15+disp],al" fed from the graphics settings struct, so forcing AL to 0 just
         // before the store is what disables the effect. Offsets into that struct differ from DERQ's, but the shape of
         // the code is identical.
-        static constexpr PatchSite colorCorrection    = { "Color Correction",     0x77BFE1, "43 88 44 3E 0C",          "mov [r14+r15+0C],al",       "", PatchAction::ForceALZero, 5 };
-        static constexpr PatchSite depthOfField       = { "Depth of Field",       0x77BB58, "43 88 84 3E 4C 01 00 00", "mov [r14+r15+0000014C],al", "", PatchAction::ForceALZero, 8 };
-        static constexpr PatchSite glare              = { "Glare",                0x77C4DB, "43 88 84 3E F0 00 00 00", "mov [r14+r15+000000F0],al", "", PatchAction::ForceALZero, 8 };
-        static constexpr PatchSite lensDistortion     = { "Lens Distortion",      0x77CABD, "43 88 84 3E 98 01 00 00", "mov [r14+r15+00000198],al", "", PatchAction::ForceALZero, 8 };
-        static constexpr PatchSite antiAliasing       = { "Anti-Aliasing",        0x77CDB1, "43 88 44 3E 70",          "mov [r14+r15+70],al",       "", PatchAction::ForceALZero, 5 };
-        static constexpr PatchSite temporalAA         = { "Temporal AA",          0x77CDFD, "43 88 44 3E 71",          "mov [r14+r15+71],al",       "", PatchAction::ForceALZero, 5 };
-        static constexpr PatchSite motionBlur         = { "Motion Blur",          0x77D31D, "43 88 44 3E 60",          "mov [r14+r15+60],al",       "", PatchAction::ForceALZero, 5 };
-        static constexpr PatchSite ssao               = { "SSAO",                 0x77D47D, "43 88 84 3E A0 01 00 00", "mov [r14+r15+000001A0],al", "", PatchAction::ForceALZero, 8 };
-        static constexpr PatchSite rlrLighting        = { "RLR Lighting",         0x77D992, "43 88 84 3E FC 01 00 00", "mov [r14+r15+000001FC],al", "", PatchAction::ForceALZero, 8 };
-        static constexpr PatchSite fog                = { "Fog",                  0x77DA2F, "43 88 84 3E 88 09 00 00", "mov [r14+r15+00000988],al", "", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite colorCorrection    = { "Color Correction", 0x77BFE1, "43 88 44 3E 0C", "mov [r14+r15+0C],al", "43 88 44 3E 0C", PatchAction::ForceALZero, 5 };
+        static constexpr PatchSite depthOfField       = { "Depth of Field", 0x77BB58, "43 88 84 3E 4C 01 00 00", "mov [r14+r15+0000014C],al", "43 88 84 3E 4C 01 00 00", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite glare              = { "Glare", 0x77C4DB, "43 88 84 3E F0 00 00 00", "mov [r14+r15+000000F0],al", "43 88 84 3E F0 00 00 00", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite lensDistortion     = { "Lens Distortion", 0x77CABD, "43 88 84 3E 98 01 00 00", "mov [r14+r15+00000198],al", "43 88 84 3E 98 01 00 00", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite antiAliasing       = { "Anti-Aliasing", 0x77CDB1, "43 88 44 3E 70", "mov [r14+r15+70],al", "43 88 44 3E 70", PatchAction::ForceALZero, 5 };
+        static constexpr PatchSite temporalAA         = { "Temporal AA", 0x77CDFD, "43 88 44 3E 71", "mov [r14+r15+71],al", "43 88 44 3E 71", PatchAction::ForceALZero, 5 };
+        static constexpr PatchSite motionBlur         = { "Motion Blur", 0x77D31D, "43 88 44 3E 60", "mov [r14+r15+60],al", "43 88 44 3E 60", PatchAction::ForceALZero, 5 };
+        static constexpr PatchSite ssao               = { "SSAO", 0x77D47D, "43 88 84 3E A0 01 00 00", "mov [r14+r15+000001A0],al", "43 88 84 3E A0 01 00 00", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite rlrLighting        = { "RLR Lighting", 0x77D992, "43 88 84 3E FC 01 00 00", "mov [r14+r15+000001FC],al", "43 88 84 3E FC 01 00 00", PatchAction::ForceALZero, 8 };
+        static constexpr PatchSite fog                = { "Fog", 0x77DA2F, "43 88 84 3E 88 09 00 00", "mov [r14+r15+00000988],al", "43 88 84 3E 88 09 00 00", PatchAction::ForceALZero, 8 };
 
         const struct { const PatchSite& Site; bool Enabled; } toggles[] = {
             { colorCorrection, PlayerSettingsPDQ2.RS.ColorCorrection },
@@ -181,26 +181,26 @@ namespace EnigmaFix
         // These have no PlayerSettings flag yet, so they are recorded rather than wired up.
         // The two unnamed sites were left unidentified in the Cheat Engine table as well.
         static constexpr PatchSite unsettable[] = {
-            { "Chromatic Aberration", 0x77CCFD, "43 88 84 3E 84 01 00 00", "mov [r14+r15+00000184],al", "", PatchAction::Document, 8 },
-            { "Unidentified Toggle 1",0x77B841, "43 88 84 3E A4 00 00 00", "mov [r14+r15+000000A4],al", "", PatchAction::Document, 8 },
-            { "Unidentified Toggle 2",0x77B82C, "43 88 84 3E 81 09 00 00", "mov [r14+r15+00000981],al", "", PatchAction::Document, 8 },
+            { "Chromatic Aberration", 0x77CCFD, "43 88 84 3E 84 01 00 00", "mov [r14+r15+00000184],al", "43 88 84 3E 84 01 00 00", PatchAction::Document, 8 },
+            { "Unidentified Toggle 1", 0x77B841, "43 88 84 3E A4 00 00 00", "mov [r14+r15+000000A4],al", "43 88 84 3E A4 00 00 00", PatchAction::Document, 8 },
+            { "Unidentified Toggle 2", 0x77B82C, "43 88 84 3E 81 09 00 00", "mov [r14+r15+00000981],al", "43 88 84 3E 81 09 00 00", PatchAction::Document, 8 },
         };
         ApplyPatchSites(baseModule, unsettable, "Post Processing");
 
         // Forcing SMAA on. Note this fights the anti-aliasing toggles above: the table's SMAA script sets +70 and +78
         // to 1, so only enable this when TAA is left on.
         static constexpr PatchSite smaa[] = {
-            { "SMAA Enable",     0x77CDB1, "43 88 44 3E 70",       "mov [r14+r15+70],al",       "", PatchAction::Document, 5 },
-            { "SMAA Method",     0x77CEAC, "43 89 44 3E 78",       "mov [r14+r15+78],eax",      "", PatchAction::Document, 5 },
-            { "SMAA Threshold",  0x77CF0F, "F3 43 0F 11 4C 3E 7C", "movss [r14+r15+7C],xmm1",   "", PatchAction::Document, 7 },
+            { "SMAA Enable", 0x77CDB1, "43 88 44 3E 70", "mov [r14+r15+70],al", "43 88 44 3E 70", PatchAction::Document, 5 },
+            { "SMAA Method", 0x77CEAC, "43 89 44 3E 78", "mov [r14+r15+78],eax", "43 89 44 3E 78", PatchAction::Document, 5 },
+            { "SMAA Threshold", 0x77CF0F, "F3 43 0F 11 4C 3E 7C", "movss [r14+r15+7C],xmm1", "F3 43 0F 11 4C 3E 7C", PatchAction::Document, 7 },
         };
         ApplyPatchSites(baseModule, smaa, "Anti-Aliasing");
 
         // Motion blur shutter ratio and max blur length, the DERQ2 equivalent of the pair the DERQ plugin overrides via
         // xmm1. Once signatures exist these should be mid-hooks feeding RS.MotionBlurPreset, not NOPs.
         static constexpr PatchSite motionBlurTweaks[] = {
-            { "Motion Blur Shutter Ratio",   0x77D3D2, "F3 43 0F 11 4C 3E 68", "movss [r14+r15+68],xmm1", "", PatchAction::Document, 7 },
-            { "Motion Blur Max Blur Length", 0x77D430, "F3 43 0F 11 4C 3E 6C", "movss [r14+r15+6C],xmm1", "", PatchAction::Document, 7 },
+            { "Motion Blur Shutter Ratio", 0x77D3D2, "F3 43 0F 11 4C 3E 68", "movss [r14+r15+68],xmm1", "F3 43 0F 11 4C 3E 68", PatchAction::Document, 7 },
+            { "Motion Blur Max Blur Length", 0x77D430, "F3 43 0F 11 4C 3E 6C", "movss [r14+r15+6C],xmm1", "F3 43 0F 11 4C 3E 6C", PatchAction::Document, 7 },
         };
         ApplyPatchSites(baseModule, motionBlurTweaks, "Motion Blur");
     }
