@@ -487,6 +487,12 @@ namespace EnigmaFix {
             SameLine();
             HelpMarker("In tenths of a mip level; negative sharpens distant textures. Only worth using with temporal "
                        "AA enabled, since without it a negative bias trades blur for shimmer. -5 to -10 is typical.");
+
+            Checkbox("Pillarbox UI to 16:9", &SettingsUI.RS.PillarboxUI);
+            SameLine();
+            HelpMarker("Confines the 2D UI to a centred 16:9 box rather than letting it stretch across the whole "
+                       "screen. Mouse driven menus are not remapped yet, so the cursor will not line up with what "
+                       "it is pointing at while this is on.");
         }
         std::string input = std::string("\xef\x84\x9b ") + LocUI.Strings.collapsingHeader_Input;
         if (CollapsingHeader(input.c_str()), ImGuiTreeNodeFlags_Leaf) {

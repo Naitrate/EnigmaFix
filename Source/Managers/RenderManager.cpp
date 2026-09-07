@@ -509,7 +509,7 @@ namespace {
     constexpr float kQuadEpsilon         = 1e-3f;
 
     // Two different buffers are intercepted through the same Map/Unmap pair, so the record says which fixup to run.
-    enum class MappedBufferKind { YebisQuad, PerViewConstants, TemporalAAConstants };
+    enum class MappedBufferKind { YebisQuad, PerViewConstants, TemporalAAConstants, UIProjection };
 
     struct PendingQuadMap {
         void*            Data;
@@ -1330,6 +1330,23 @@ namespace {
         return (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0;
     }
 
+    // Returns the buffer's size when it is a constant buffer inside the given range, or 0 otherwise, so the caller
+    // gets the size and the test out of one GetDesc rather than two.
+    UINT ConstantBufferSizeInRange(ID3D11Resource* pResource, const UINT minBytes, const UINT maxBytes)
+    {
+        if (pResource == nullptr) { return 0; }
+
+        D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        pResource->GetType(&dimension);
+        if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) { return 0; }
+
+        D3D11_BUFFER_DESC desc = {};
+        static_cast<ID3D11Buffer*>(pResource)->GetDesc(&desc);
+        if (desc.ByteWidth < minBytes || desc.ByteWidth > maxBytes) { return 0; }
+        if ((desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0) { return 0; }
+        return desc.ByteWidth;
+    }
+
     bool ShouldCorrectYebisQuads()
     {
         if (PlayerSettingsRm.GameMode != EnigmaFix::PlayerSettings::DERQ) { return false; }
@@ -1337,6 +1354,86 @@ namespace {
         if (*InternalHorizontalRes <= 0 || *InternalVerticalRes <= 0) { return false; }
         // At 1080p the ratio is 1.0 and there is nothing to correct.
         return !(*InternalHorizontalRes == 1920 && *InternalVerticalRes == 1080);
+    }
+
+    // The 2D UI projections are small constant buffers, and the matrix is not always at offset 0, so the buffer is
+    // identified by its contents rather than by size. Anything outside this range cannot be one of them.
+    constexpr UINT kUIProjectionMinSize = 64;
+    constexpr UINT kUIProjectionMaxSize = 256;
+
+    bool ShouldPillarboxUI()
+    {
+        if (!PlayerSettingsRm.RS.PillarboxUI) { return false; }
+        return *InternalHorizontalRes > 0 && *InternalVerticalRes > 0;
+    }
+
+    // Both UI projections the engine uses -- gProjectionMatrix2D for the HUD, bustups and battle UI, and
+    // Mk_ViewProjection for the title screen, pause menu and VN text box -- are row major orthographic matrices laid
+    // out for a 1920x1080 canvas:
+    //
+    //     m00 =  2/1920    m03 = -1        (the two differ only in whether the translation is exactly -1 or -1.0005)
+    //     m11 = -2/1080    m13 = +1
+    //
+    // Because the result is clip space, that canvas is stretched across the whole target whatever its shape. Scaling
+    // the major axis' scale and translation by the same factor shrinks the canvas about the screen centre instead,
+    // which is the pillarbox. The translation has to move with the scale or the box ends up hard against one edge.
+    //
+    // Matching on the unscaled constants makes this self limiting: once a buffer has been scaled its m00 no longer
+    // looks like 2/1920, so a second pass over the same data cannot compound. That matters because the engine
+    // rewrites these buffers per frame and there is no way to tell a fresh write from a stale one.
+    void PillarboxUIProjection(void* data, const UINT byteWidth)
+    {
+        if (data == nullptr || byteWidth < kUIProjectionMinSize) { return; }
+
+        const float width  = static_cast<float>(*InternalHorizontalRes);
+        const float height = static_cast<float>(*InternalVerticalRes);
+        const float target = 16.0f / 9.0f;
+        const float actual = width / height;
+
+        // Wider than 16:9 squeezes horizontally, narrower squeezes vertically. Within a hair of 16:9 there is
+        // nothing to do, and scaling by 1.0 would only risk precision noise.
+        float scaleX = 1.0f, scaleY = 1.0f;
+        if (actual > target + 1e-4f)      { scaleX = target / actual; }
+        else if (actual < target - 1e-4f) { scaleY = actual / target; }
+        else                              { return; }
+
+        constexpr float kExpectedM00 = 2.0f / 1920.0f;
+        constexpr float kExpectedM11 = -2.0f / 1080.0f;
+        constexpr float kMatrixEpsilon = 1e-5f;   // Tight: these are exact constants, not measured values.
+
+        const auto matches = [](const float a, const float b) { return fabsf(a - b) < kMatrixEpsilon; };
+
+        float* floats = static_cast<float*>(data);
+        // Constant buffer members are 16 byte aligned, so a 4x4 can only start on a float4 boundary.
+        for (UINT offset = 0; offset + 16 <= byteWidth / sizeof(float); offset += 4) {
+            float* m = floats + offset;
+
+            if (!matches(m[0], kExpectedM00)) { continue; }
+            if (!matches(m[5], kExpectedM11)) { continue; }
+            // The off diagonal terms of the first two rows are exactly zero in both matrices; requiring that rules
+            // out anything that merely happens to carry a similar looking pair of scales.
+            if (m[1] != 0.0f || m[2] != 0.0f || m[4] != 0.0f || m[6] != 0.0f) { continue; }
+            // Translations sit at -1 and +1 give or take the half pixel offset the HUD matrix carries.
+            if (fabsf(m[3] + 1.0f) > 1e-2f || fabsf(m[7] - 1.0f) > 1e-2f) { continue; }
+
+            m[0] *= scaleX;
+            m[3] *= scaleX;
+            m[5] *= scaleY;
+            m[7] *= scaleY;
+
+            // Every distinct buffer layout is reported once. Recording every small constant buffer to find these is
+            // wasteful in the Map hook's hot path, so the sizes logged here are what the range should be narrowed to
+            // once it is known which buffers actually carry a UI projection.
+            // Unmap can run from a deferred context on another thread, and this is reached outside the map's lock.
+            static std::mutex                      logMutex;
+            static std::set<std::pair<UINT, UINT>> loggedLayouts;
+            std::lock_guard<std::mutex>            logLock(logMutex);
+            if (loggedLayouts.insert({ byteWidth, offset }).second) {
+                spdlog::info("UI: Pillarboxing a 2D UI projection at {}x{} (buffer {} bytes, matrix at float offset "
+                             "{}, horizontal scale {:.5f}, vertical scale {:.5f}).",
+                             *InternalHorizontalRes, *InternalVerticalRes, byteWidth, offset, scaleX, scaleY);
+            }
+        }
     }
 }
 
@@ -2027,6 +2124,16 @@ namespace EnigmaFix {
             pendingQuadMaps[pResource] = { pMappedResource->pData, kTemporalAACBSize,
                                            MappedBufferKind::TemporalAAConstants };
         }
+        else if (ShouldPillarboxUI()) {
+            // Neither UI projection has a size worth keying on -- one shares 64 bytes with plenty of unrelated
+            // $Globals -- so every small constant buffer is recorded and the content check in the Unmap handler does
+            // the actual identification. It has to be that way round: at Map time the game has not written yet.
+            const UINT byteWidth = ConstantBufferSizeInRange(pResource, kUIProjectionMinSize, kUIProjectionMaxSize);
+            if (byteWidth != 0) {
+                std::lock_guard<std::mutex> lock(quadMapMutex);
+                pendingQuadMaps[pResource] = { pMappedResource->pData, byteWidth, MappedBufferKind::UIProjection };
+            }
+        }
         return hr;
     }
 
@@ -2056,6 +2163,7 @@ namespace EnigmaFix {
                 case MappedBufferKind::TemporalAAConstants:
                     ApplyJitteredResolveWeights(pending.Data, pending.ByteWidth);
                     break;
+                case MappedBufferKind::UIProjection: PillarboxUIProjection(pending.Data, pending.ByteWidth); break;
                 }
             }
         }

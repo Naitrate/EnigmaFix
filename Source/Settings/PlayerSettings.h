@@ -129,6 +129,12 @@ namespace EnigmaFix {
             // target. The two only agree when assumed and actual match -- 1080p or true 4K -- which is exactly the
             // set of resolutions where the minimap is not broken. Rescaling the rect is a no-op at both of those.
             bool FixMinimapScissor         = true;
+            // All 2D UI goes through an orthographic matrix hardcoded to 1920x1080, so it always stretches to fill
+            // whatever the target happens to be. Scaling that matrix's major axis confines the UI to a centred 16:9
+            // box: pillarboxed when the display is wider than 16:9, letterboxed when it is narrower. This only moves
+            // pixels -- the game still hit tests the cursor against the unscaled layout, so mouse driven menus will
+            // be offset until the input side is remapped to match.
+            bool PillarboxUI               = false;
             bool Tonemapping               = true;
             bool Vignette                  = true;
             int  MotionBlurPreset          = 1;    // Ideally, I want a few different presets for exposure settings (short, medium, long) that can be chosen based on preference and the framerate target.
