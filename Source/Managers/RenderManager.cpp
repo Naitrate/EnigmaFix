@@ -36,6 +36,7 @@ SOFTWARE.
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <iterator>
 #include <set>
 // Third Party Libraries
 #include <map>
@@ -1462,6 +1463,144 @@ void RefreshCachedRenderSize()
     *height = *InternalVerticalRes;
 }
 
+// Probe for the minimap clipping bug. The UI is authored in a 1920x1080 virtual pixel space -- gProjectionMatrix2D is
+// exactly (2/1920, -2/1080) at every output resolution -- and stretched to the real target, so UI geometry lands on a
+// fixed NDC footprint. A clip rectangle expressed in real pixels would not scale with it, which is consistent with the
+// minimap being correct at 1080p and wrong at every other resolution regardless of aspect.
+//
+// This deliberately runs at draw time rather than from an RSSetScissorRects hook. That hook fires during resize and
+// teardown, and calling OMGetRenderTargets there takes a reference to a backbuffer render target view while
+// ResizeBuffers is trying to release them, which makes the resize fail -- changing resolution crashed instantly. By
+// the time a draw is issued the pipeline is fully bound, and both queries below are the same ones
+// ResizePostProcessRasterizerState already makes safely on every draw.
+void ProbeScissorRects(ID3D11DeviceContext* pContext)
+{
+    if (!PlayerSettingsRm.RES.UseCustomRes) { return; }
+
+    UINT numRects = 0;
+    pContext->RSGetScissorRects(&numRects, nullptr);
+    if (numRects != 1) { return; }
+
+    D3D11_RECT rect = {};
+    pContext->RSGetScissorRects(&numRects, &rect);
+
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
+    if (!GetBoundRenderTargetDesc(pContext, texDesc, viewFormat)) { return; }
+
+    // A fixed array rather than a set, so the hot path is a bounded scan with no allocation. Deferred contexts can
+    // reach this from another thread, hence the lock -- the same reason Map/Unmap needed one.
+    struct SeenRect { LONG Left, Top, Right, Bottom; UINT Width, Height; };
+    static std::mutex probeMutex;
+    static SeenRect  seen[48] = {};
+    static int       seenCount = 0;
+
+    std::lock_guard<std::mutex> lock(probeMutex);
+    for (int i = 0; i < seenCount; ++i) {
+        const SeenRect& s = seen[i];
+        if (s.Left == rect.left && s.Top == rect.top && s.Right == rect.right && s.Bottom == rect.bottom
+            && s.Width == texDesc.Width && s.Height == texDesc.Height) {
+            return;
+        }
+    }
+    if (seenCount >= static_cast<int>(std::size(seen))) { return; }
+
+    seen[seenCount++] = { rect.left, rect.top, rect.right, rect.bottom, texDesc.Width, texDesc.Height };
+    spdlog::info("Scissor probe: rect ({}, {}) to ({}, {}) on a {}x{} target.", rect.left, rect.top, rect.right,
+                 rect.bottom, texDesc.Width, texDesc.Height);
+}
+
+// Rescales the minimap's clip rectangle out of the resolution preset the game thinks is active and into the one it is
+// actually rendering at.
+//
+// Measured across three resolutions. The rect the game sets is:
+//     1920x1080  ->  (121,  84) to (324, 287)     203 x 203, correct
+//     3440x1440  ->  (242, 168) to (648, 574)     406 x 406, broken
+// Every component is exactly doubled, which is neither 3440/1920 nor 1440/1080 -- it is 3840x2160 over 1920x1080. The
+// mod obtains custom resolutions by overwriting the "4K Native" preset, so the game lays this rect out believing it is
+// at 4K. The minimap geometry meanwhile goes through gProjectionMatrix2D, hardcoded to (2/1920, -2/1080) at every
+// resolution, so it occupies a fixed fraction of whatever the target is. Confirmed by prediction: at a true 3840x2160
+// the assumed and actual resolutions coincide and the minimap renders correctly.
+//
+// Scaling by actual/assumed is therefore a no-op at exactly the two resolutions where the minimap already works, and
+// only does anything where it is already broken.
+void CorrectMinimapScissor(ID3D11DeviceContext* pContext)
+{
+    if (!PlayerSettingsRm.RES.UseCustomRes || !PlayerSettingsRm.RS.FixMinimapScissor) { return; }
+    if (*InternalHorizontalRes <= 0 || *InternalVerticalRes <= 0) { return; }
+
+    // Which space the rect is laid out in depends on which preset slot the mod overwrote, not on how large the
+    // resolution is. Vanilla only ever had two internal resolutions: every preset except "4K Native" rendered at
+    // 1920x1080 and upscaled to the chosen output, and 4K Native rendered at 3840x2160. That is why the scale is
+    // only ever 1x or 2x. ResolutionPatches writes the configured custom resolution into the 4K Native slot and the
+    // selected list entry into the 1080p slot, so the internal resolution matching the configured custom resolution
+    // is what identifies the 4K Native preset being active.
+    //
+    // This gets the sub-1080p case right, which a magnitude test would not: picking 1280x720 uses the 1080p slot, so
+    // its rect is in 1920x1080 space and wants scaling down, not up. It also handles picking 3840x2160 from the list
+    // rather than as the custom resolution -- the game still assumes 1080p there, so the 2x correction still applies.
+    const bool customPresetActive = (*InternalHorizontalRes == PlayerSettingsRm.RES.Resolution.x
+                                  && *InternalVerticalRes   == PlayerSettingsRm.RES.Resolution.y);
+    const float assumedWidth  = customPresetActive ? 3840.0f : 1920.0f;
+    const float assumedHeight = customPresetActive ? 2160.0f : 1080.0f;
+
+    // Nothing to do when the preset's assumed resolution already matches what we are rendering at.
+    if (static_cast<float>(*InternalHorizontalRes) == assumedWidth
+        && static_cast<float>(*InternalVerticalRes) == assumedHeight) {
+        return;
+    }
+
+    UINT numRects = 0;
+    pContext->RSGetScissorRects(&numRects, nullptr);
+    if (numRects != 1) { return; }
+
+    D3D11_RECT rect = {};
+    pContext->RSGetScissorRects(&numRects, &rect);
+
+    // The minimap rect is the only scissor in the frame with a non-zero origin -- across four captured sessions every
+    // other one of roughly twenty distinct rects starts at (0,0). That is what identifies it without needing to know
+    // anything about the draw.
+    if (rect.left <= 0 && rect.top <= 0) { return; }
+
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
+    if (!GetBoundRenderTargetDesc(pContext, texDesc, viewFormat)) { return; }
+    if (texDesc.Width != static_cast<UINT>(*InternalHorizontalRes)) { return; }
+    if (texDesc.Height != static_cast<UINT>(*InternalVerticalRes)) { return; }
+
+    const float scaleX = static_cast<float>(*InternalHorizontalRes) / assumedWidth;
+    const float scaleY = static_cast<float>(*InternalVerticalRes)   / assumedHeight;
+
+    D3D11_RECT corrected = {};
+    corrected.left   = static_cast<LONG>(static_cast<float>(rect.left)   * scaleX + 0.5f);
+    corrected.top    = static_cast<LONG>(static_cast<float>(rect.top)    * scaleY + 0.5f);
+    corrected.right  = static_cast<LONG>(static_cast<float>(rect.right)  * scaleX + 0.5f);
+    corrected.bottom = static_cast<LONG>(static_cast<float>(rect.bottom) * scaleY + 0.5f);
+
+    // Scissor state persists across draws, so without this the corrected rect would be read back on the next draw and
+    // scaled again, shrinking toward the top left a little more every draw. Remembering what we wrote is the same
+    // idempotency problem the YEBIS texture coordinate fix had, solved the same way.
+    static std::mutex     scissorMutex;
+    static D3D11_RECT     lastWritten = {};
+    std::lock_guard<std::mutex> lock(scissorMutex);
+    if (rect.left == lastWritten.left && rect.top == lastWritten.top
+        && rect.right == lastWritten.right && rect.bottom == lastWritten.bottom) {
+        return;
+    }
+    lastWritten = corrected;
+
+    static bool loggedCorrection = false;
+    if (!loggedCorrection) {
+        loggedCorrection = true;
+        spdlog::info("Correcting the minimap clip rectangle from ({}, {})-({}, {}) to ({}, {})-({}, {}). The game lays "
+                     "it out for 3840x2160 because a custom resolution uses the 4K Native preset, while the minimap "
+                     "geometry is projected for {}x{}.", rect.left, rect.top, rect.right, rect.bottom,
+                     corrected.left, corrected.top, corrected.right, corrected.bottom,
+                     *InternalHorizontalRes, *InternalVerticalRes);
+    }
+    pContext->RSSetScissorRects(1, &corrected);
+}
+
 // Corrects the viewport and scissor rect for the post processing chain, which the engine leaves hardcoded at 1920x1080
 // no matter how large the render target actually is.
 //
@@ -1821,6 +1960,8 @@ namespace EnigmaFix {
         // selecting instead, and the cheap viewport check runs before any render target lookup.
         if (rm_Instance.oDrawIndexed == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
 
+        ProbeScissorRects(pContext);
+        CorrectMinimapScissor(pContext);
         ResizePostProcessRasterizerState(pContext);
 
         // The YEBIS constant buffer patch does stay filtered. It targets the fullscreen passes specifically, and it

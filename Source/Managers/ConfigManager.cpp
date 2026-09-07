@@ -222,6 +222,7 @@ namespace EnigmaFix {
                 { "Rendering",   "TAAReplaceResolve",         FromBool(PlayerSettingsConf.RS.TAAReplaceResolve) },
                 { "Rendering",   "AnisotropicFiltering",      FromInt(PlayerSettingsConf.RS.AnisotropicFiltering) },
                 { "Rendering",   "TextureLODBias",            FromInt(PlayerSettingsConf.RS.TextureLODBias) },
+                { "Rendering",   "FixMinimapScissor",         FromBool(PlayerSettingsConf.RS.FixMinimapScissor) },
                 { "Rendering",   "Tonemapping",               FromBool(PlayerSettingsConf.RS.Tonemapping) },
                 { "Rendering",   "Vignette",                  FromBool(PlayerSettingsConf.RS.Vignette) },
 
@@ -306,6 +307,7 @@ namespace EnigmaFix {
         inipp::extract(config.sections["Rendering"]["TAAReplaceResolve"], PlayerSettingsConf.RS.TAAReplaceResolve);
         inipp::extract(config.sections["Rendering"]["AnisotropicFiltering"], PlayerSettingsConf.RS.AnisotropicFiltering);
         inipp::extract(config.sections["Rendering"]["TextureLODBias"], PlayerSettingsConf.RS.TextureLODBias);
+        inipp::extract(config.sections["Rendering"]["FixMinimapScissor"], PlayerSettingsConf.RS.FixMinimapScissor);
         inipp::extract(config.sections["Rendering"]["Tonemapping"], PlayerSettingsConf.RS.Tonemapping);
         inipp::extract(config.sections["Rendering"]["Vignette"], PlayerSettingsConf.RS.Vignette);
         // Input Settings

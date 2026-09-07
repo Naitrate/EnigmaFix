@@ -122,6 +122,13 @@ namespace EnigmaFix {
             // Texture LOD bias in tenths of a mip level, negative sharpens. Worth having only now that temporal AA
             // resolves properly -- a negative bias without working TAA just trades blur for shimmer.
             int  TextureLODBias            = 0;
+            // The game lays the minimap's clip rectangle out in the pixel space of whichever resolution preset it
+            // thinks is active. Custom resolutions are obtained by overwriting the "4K Native" preset, so the game
+            // believes it is at 3840x2160 and the rect comes through scaled for that, while the minimap geometry
+            // goes through a projection hardcoded to 1920x1080 and therefore lands on a fixed fraction of the real
+            // target. The two only agree when assumed and actual match -- 1080p or true 4K -- which is exactly the
+            // set of resolutions where the minimap is not broken. Rescaling the rect is a no-op at both of those.
+            bool FixMinimapScissor         = true;
             bool Tonemapping               = true;
             bool Vignette                  = true;
             int  MotionBlurPreset          = 1;    // Ideally, I want a few different presets for exposure settings (short, medium, long) that can be chosen based on preference and the framerate target.
