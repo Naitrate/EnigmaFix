@@ -151,3 +151,79 @@ rather than rewrites, and a renderer gap between titles is more likely to be a d
 - Identify shaders by parsing the DXBC `RDEF` chunk rather than substring matching: "DXBC", 16 byte hash, version,
   size, chunk count, chunk offsets; RDEF holds a resource binding array of 32 byte entries for shader model 5,
   each `nameOffset, type, returnType, dimension, numSamples, bindPoint, bindCount, flags`, with type 2 = texture.
+
+---
+
+## 9. The post processing settings struct
+
+Both games apply post processing settings the same way: a run of `mov [base + offset], al` stores into one settings
+struct, inside the routine the options menu calls. Forcing `AL` at the store is how every toggle in this mod works,
+and it is also what the Cheat Engine tables in the repo root do — those tables are the origin of the DERQ1
+signatures, and are worth reading before deriving anything by hand.
+
+The struct **layouts differ between games**; they are not the same offsets shifted. Base register differs too.
+
+### DERQ 1 — base `rcx+r13`
+
+| offset | feature | RVA |
+|---|---|---|
+| 0x04 | Color Correction | 29C858 |
+| 0x58 | Motion Blur | 29CFF3 |
+| 0x60 | Shutter Ratio (float) | 29D056 |
+| 0x64 | Max Blur Length (float) | 29D093 |
+| 0x68 | Post / generic AA | 29CF64 |
+| 0x69 | Temporal AA | 29CF8D |
+| 0x70 | Tonemapping | 29C420 |
+| 0xBC | **Glare** | 29CB44 |
+| 0xEC | Lens Flare | 29CE43 |
+| 0x118 | Depth of Field | 29C600 |
+| 0x160 | Camera Distortion | 29CEF5 |
+| 0x164 | Vignette intensity (float) | 29CF36 |
+| 0x168 | SSAO | 29D0BE |
+| 0x1C4 | RLR | 29D3DF |
+| — | Fog, base `rcx+rsi` +0x04 | 29D495 |
+
+Note 0xBC: the table calls it **Glare**, and the mod exposes it as `RS.Bloom`. In YEBIS terms those are the same
+effect, but the table adds "needs to be disabled alongside Depth of Field to prevent glare flickering".
+
+Two DERQ1 entries the mod does **not** implement yet:
+- **Disable all post processing** — `cmp eax,01` at `6D8639` patched to `cmp eax,00`. The mod finds this signature
+  and only logs it.
+- **Vignette intensity** — the table redirects the store at `29CF36` to read a float it owns, so intensity is
+  adjustable rather than just on/off. The mod hardcodes `0.0f`.
+
+### DERQ 2 — base `r14+r15`
+
+Verified against the installed executable: every one of these stores is **unique in `.text` on its own**, so the
+five to eight byte anchor is a sufficient signature — no trailing context needed, unlike DERQ1.
+
+| offset | feature | RVA | signature |
+|---|---|---|---|
+| 0x0C | Color Correction | 77BFE1 | `43 88 44 3E 0C` |
+| 0x60 | Motion Blur | 77D31D | `43 88 44 3E 60` |
+| 0x68 | Shutter Ratio (float) | 77D3D2 | `movss [r14+r15+68],xmm1` |
+| 0x6C | Max Blur Length (float) | 77D430 | `movss [r14+r15+6C],xmm1` |
+| 0x70 | Generic AA | 77CDB1 | `43 88 44 3E 70` |
+| 0x71 | Temporal AA | 77CDFD | `43 88 44 3E 71` |
+| 0x78 | **SMAA enable** | 77CEAC | `mov [r14+r15+78],eax` |
+| 0x7C | **SMAA threshold** (float, default 0.1) | 77CF0F | `movss [r14+r15+7C],xmm1` |
+| 0xA4 | unknown | 77B841 | `43 88 84 3E A4 00 00 00` |
+| 0xF0 | Glare | 77C4DB | `43 88 84 3E F0 00 00 00` |
+| 0x14C | Depth of Field | 77BB58 | `43 88 84 3E 4C 01 00 00` |
+| 0x184 | **Chromatic Aberration** | 77CCFD | `43 88 84 3E 84 01 00 00` |
+| 0x198 | **Lens Distortion** | 77CABD | `43 88 84 3E 98 01 00 00` |
+| 0x1A0 | SSAO | 77D47D | `43 88 84 3E A0 01 00 00` |
+| 0x1FC | RLR | 77D992 | `43 88 84 3E FC 01 00 00` |
+| 0x981 | unknown | 77B82C | `43 88 84 3E 81 09 00 00` |
+| 0x988 | Fog | 77DA2F | `43 88 84 3E 88 09 00 00` |
+
+### What DERQ2 has that DERQ1 does not
+
+- **SMAA.** Offsets 0x78 and 0x7C. The table's "SMAA?" script sets `0x70 = 1`, `0x71 = 0`, `0x78 = 1` and
+  overrides the threshold — i.e. it switches the game from temporal AA to SMAA. There is no DERQ1 equivalent.
+- **Chromatic Aberration** and **Lens Distortion** as separate toggles, where DERQ1 has only Camera Distortion.
+- A volumetric fog chain in the technique list (see §7).
+
+`Plugin_DERQ2::GraphicsSettingsPatches` currently has no signatures at all, so all of the above is unimplemented.
+Given the signatures are single anchors and the mid-hook helper already exists in `Plugin_DERQ`, filling it in is
+mechanical.
