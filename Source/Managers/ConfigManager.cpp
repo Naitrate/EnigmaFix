@@ -51,6 +51,23 @@ namespace EnigmaFix {
         config.generate(cout);
         config.default_section(config.sections["Settings"]);
         config.interpolate();
+
+        // inipp has no concept of a trailing comment, so "TextureLODBias = -5   # tenths" parses as the whole string
+        // and extract() leaves the setting at its default without complaining. That is a silent wrong answer, and it
+        // already cost one test run. Anything after an unquoted #, ; or // is stripped before the values are read.
+        for (auto& section : config.sections) {
+            for (auto& entry : section.second) {
+                std::string& value = entry.second;
+                size_t cut = std::string::npos;
+                for (size_t i = 0; i < value.size(); ++i) {
+                    if (value[i] == '#' || value[i] == ';') { cut = i; break; }
+                    if (value[i] == '/' && i + 1 < value.size() && value[i + 1] == '/') { cut = i; break; }
+                }
+                if (cut == std::string::npos) { continue; }
+                value.erase(cut);
+                while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) { value.pop_back(); }
+            }
+        }
     }
 
 
@@ -195,11 +212,16 @@ namespace EnigmaFix {
                 { "Rendering",   "Shadows",                   FromBool(PlayerSettingsConf.RS.Shadows) },
                 { "Rendering",   "ShadowResolution",          FromInt(PlayerSettingsConf.RS.ShadowRes) },
                 { "Rendering",   "SSAO",                      FromBool(PlayerSettingsConf.RS.SSAO) },
+                { "Rendering",   "SSAOMode",                  PlayerSettingsConf.RS.SSAOMode == 1 ? "GTAO" : "Engine" },
+                { "Rendering",   "SSAORadius",                FromInt(PlayerSettingsConf.RS.SSAORadius) },
+                { "Rendering",   "SSAOIntensity",             FromInt(PlayerSettingsConf.RS.SSAOIntensity) },
                 { "Rendering",   "SSR",                       FromBool(PlayerSettingsConf.RS.SSR) },
                 { "Rendering",   "TAA",                       FromBool(PlayerSettingsConf.RS.TAA) },
                 { "Rendering",   "TAAJitter",                 FromBool(PlayerSettingsConf.RS.TAAJitter) },
                 { "Rendering",   "TAASharpness",              FromInt(PlayerSettingsConf.RS.TAASharpness) },
                 { "Rendering",   "TAAReplaceResolve",         FromBool(PlayerSettingsConf.RS.TAAReplaceResolve) },
+                { "Rendering",   "AnisotropicFiltering",      FromInt(PlayerSettingsConf.RS.AnisotropicFiltering) },
+                { "Rendering",   "TextureLODBias",            FromInt(PlayerSettingsConf.RS.TextureLODBias) },
                 { "Rendering",   "Tonemapping",               FromBool(PlayerSettingsConf.RS.Tonemapping) },
                 { "Rendering",   "Vignette",                  FromBool(PlayerSettingsConf.RS.Vignette) },
 
@@ -267,6 +289,13 @@ namespace EnigmaFix {
         string ssaoQuality;
         string ssrQuality;
         inipp::extract(config.sections["Rendering"]["SSAOQuality"], ssaoQuality);
+        // "Engine" or "GTAO". Read at startup because the AO shader is created once, same as TAAReplaceResolve.
+        string ssaoMode;
+        inipp::extract(config.sections["Rendering"]["SSAOMode"], ssaoMode);
+        if (ssaoMode == "GTAO" || ssaoMode == "gtao") { PlayerSettingsConf.RS.SSAOMode = 1; }
+        else if (!ssaoMode.empty())                   { PlayerSettingsConf.RS.SSAOMode = 0; }
+        inipp::extract(config.sections["Rendering"]["SSAORadius"], PlayerSettingsConf.RS.SSAORadius);
+        inipp::extract(config.sections["Rendering"]["SSAOIntensity"], PlayerSettingsConf.RS.SSAOIntensity);
         inipp::extract(config.sections["Rendering"]["SSR"], PlayerSettingsConf.RS.SSR);
         inipp::extract(config.sections["Rendering"]["SSRQuality"], ssrQuality);
         inipp::extract(config.sections["Rendering"]["TAA"], PlayerSettingsConf.RS.TAA);
@@ -275,6 +304,8 @@ namespace EnigmaFix {
         // Read here rather than only set from the menu, because shaders are built once during startup: by the time the
         // checkbox is reachable the resolve has already been created and the toggle cannot take effect until a restart.
         inipp::extract(config.sections["Rendering"]["TAAReplaceResolve"], PlayerSettingsConf.RS.TAAReplaceResolve);
+        inipp::extract(config.sections["Rendering"]["AnisotropicFiltering"], PlayerSettingsConf.RS.AnisotropicFiltering);
+        inipp::extract(config.sections["Rendering"]["TextureLODBias"], PlayerSettingsConf.RS.TextureLODBias);
         inipp::extract(config.sections["Rendering"]["Tonemapping"], PlayerSettingsConf.RS.Tonemapping);
         inipp::extract(config.sections["Rendering"]["Vignette"], PlayerSettingsConf.RS.Vignette);
         // Input Settings

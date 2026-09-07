@@ -403,6 +403,24 @@ namespace EnigmaFix {
             Checkbox(LocUI.Strings.checkbox_SSAO.c_str(), &SettingsUI.RS.SSAO);
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_SSAO.c_str());
+            if (SettingsUI.RS.SSAO) {
+                // Not localised yet, and restart-gated for the same reason as the TAA resolve: shaders are built once.
+                static const char* aoModes[] = { "Engine", "GTAO (restart)" };
+                Combo("Ambient Occlusion Mode", &SettingsUI.RS.SSAOMode, aoModes, IM_ARRAYSIZE(aoModes));
+                SameLine();
+                HelpMarker("Replaces the engine's screen space AO with Ground Truth Ambient Occlusion, a horizon "
+                           "search over the depth buffer using the GBuffer's octahedral normals. Needs a restart.");
+                if (SettingsUI.RS.SSAOMode == 1) {
+                    SliderInt("AO Radius", &SettingsUI.RS.SSAORadius, 10, 300);
+                    SameLine();
+                    HelpMarker("Sampling radius in world units. The scene's near plane is 10 and mid-scene depths "
+                               "run into the thousands, so this is not a 0-1 value. Also needs a restart.");
+                    SliderInt("AO Intensity", &SettingsUI.RS.SSAOIntensity, 25, 400);
+                    SameLine();
+                    HelpMarker("Power applied to the visibility term. 100 is unmodified ground truth; higher "
+                               "darkens. Needs a restart.");
+                }
+            }
             // Greyed out because no plugin implements it yet. There is no Edge Rendering signature in Plugin_DERQ, so
             // the checkbox moved a value nothing reads. Drop the BeginDisabled pair once a patch exists.
             BeginDisabled();
@@ -447,6 +465,28 @@ namespace EnigmaFix {
             EndDisabled();
             SameLine();
             HelpMarker(LocUI.Strings.helpmarker_Foliage.c_str());
+        }
+        std::string texturing = std::string("\xef\x87\xbc ") + std::string("Texturing");
+        if (CollapsingHeader(texturing.c_str()), ImGuiTreeNodeFlags_Leaf)
+        {
+            // Not localised yet. Sampler states are built once at startup, so both of these need a restart.
+            static const char* afLevels[] = { "Engine default", "2x", "4x", "8x", "16x" };
+            static const int   afValues[] = { 0, 2, 4, 8, 16 };
+            int afIndex = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(afValues); ++i) {
+                if (afValues[i] == SettingsUI.RS.AnisotropicFiltering) { afIndex = i; }
+            }
+            if (Combo("Anisotropic Filtering (restart)", &afIndex, afLevels, IM_ARRAYSIZE(afLevels))) {
+                SettingsUI.RS.AnisotropicFiltering = afValues[afIndex];
+            }
+            SameLine();
+            HelpMarker("Forces anisotropic filtering on the game's texture samplers. Shadow comparison samplers and "
+                       "the point samplers the post processing chain uses for exact texel fetches are left alone.");
+
+            SliderInt("Texture LOD Bias (restart)", &SettingsUI.RS.TextureLODBias, -20, 0);
+            SameLine();
+            HelpMarker("In tenths of a mip level; negative sharpens distant textures. Only worth using with temporal "
+                       "AA enabled, since without it a negative bias trades blur for shimmer. -5 to -10 is typical.");
         }
         std::string input = std::string("\xef\x84\x9b ") + LocUI.Strings.collapsingHeader_Input;
         if (CollapsingHeader(input.c_str()), ImGuiTreeNodeFlags_Leaf) {

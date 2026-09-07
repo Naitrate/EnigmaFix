@@ -110,6 +110,18 @@ namespace EnigmaFix {
             // Shaders are only created once, so this is read when the game builds its pipeline. Toggling it in the
             // menu does nothing until a restart, unlike TAAJitter which is rewritten per frame.
             bool TAAReplaceResolve         = false;
+            // 0 = the engine's own ImageSpaceAO, 1 = GTAO. Like TAAReplaceResolve this is read at shader creation,
+            // so it needs a restart. Radius is in world units -- the scene's near plane is 10 and mid-scene depths
+            // run to the low thousands, so this is not a 0..1 knob. Intensity is a power applied to visibility.
+            int  SSAOMode                  = 0;
+            int  SSAORadius                = 60;
+            int  SSAOIntensity             = 100;
+            // 0 leaves the engine's own sampler descriptions alone; otherwise the maximum anisotropy to force.
+            // Sampler states are created once during startup, so changing this needs a restart.
+            int  AnisotropicFiltering      = 0;
+            // Texture LOD bias in tenths of a mip level, negative sharpens. Worth having only now that temporal AA
+            // resolves properly -- a negative bias without working TAA just trades blur for shimmer.
+            int  TextureLODBias            = 0;
             bool Tonemapping               = true;
             bool Vignette                  = true;
             int  MotionBlurPreset          = 1;    // Ideally, I want a few different presets for exposure settings (short, medium, long) that can be chosen based on preference and the framerate target.

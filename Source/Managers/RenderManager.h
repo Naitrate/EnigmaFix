@@ -65,6 +65,8 @@ namespace EnigmaFix {
         typedef void(__stdcall* Unmap)(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource);
         //// CreatePixelShader Hook. Used to swap the engine's temporal AA resolve for our own.
         typedef HRESULT(__stdcall* CreatePixelShader)(ID3D11Device *pDevice, const void *pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage *pClassLinkage, ID3D11PixelShader **ppPixelShader);
+        //// CreateSamplerState Hook. Used to force anisotropic filtering and a texture LOD bias.
+        typedef HRESULT(__stdcall* CreateSamplerState)(ID3D11Device *pDevice, const D3D11_SAMPLER_DESC *pSamplerDesc, ID3D11SamplerState **ppSamplerState);
         // Render Hook Functions
         static HRESULT __stdcall hkResizeBuffers(IDXGISwapChain *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
         static HRESULT __stdcall hkPresent(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags);
@@ -76,6 +78,7 @@ namespace EnigmaFix {
         static HRESULT __stdcall hkMap(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE *pMappedResource);
         static void __stdcall hkUnmap(ID3D11DeviceContext *pContext, ID3D11Resource *pResource, UINT Subresource);
         static HRESULT __stdcall hkCreatePixelShader(ID3D11Device *pDevice, const void *pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage *pClassLinkage, ID3D11PixelShader **ppPixelShader);
+        static HRESULT __stdcall hkCreateSamplerState(ID3D11Device *pDevice, const D3D11_SAMPLER_DESC *pSamplerDesc, ID3D11SamplerState **ppSamplerState);
 
         // Variables
         //// D3D11Hook functions.
@@ -89,6 +92,7 @@ namespace EnigmaFix {
         Map oMap;
         Unmap oUnmap;
         CreatePixelShader oCreatePixelShader;
+        CreateSamplerState oCreateSamplerState;
     };
 }
 

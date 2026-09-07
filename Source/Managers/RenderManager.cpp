@@ -28,6 +28,7 @@ SOFTWARE.
 #include "../Utilities/DXEnums.h"
 #include "UIManager.h"
 #include "../Shaders/TemporalAAResolve.h"
+#include "../Shaders/GroundTruthAO.h"
 // System Libraries
 //#include <comip.h>
 #include <algorithm>
@@ -860,6 +861,88 @@ namespace {
     // The replacement is compiled at runtime through d3dcompiler_47.dll, which ships next to Application.exe. Loading
     // it dynamically rather than linking avoids adding an import that would have to resolve under Proton before the
     // mod could report anything about why it failed.
+    // ---------------------------------------------------------------------------------------------------------------
+    // DXBC resource reflection.
+    //
+    // Substring matching on binding names cost three rounds of wrong guesses: first requiring a '$' prefix the engine
+    // only emits on some permutations, then requiring an AOCB that the permutation actually used in-game does not
+    // bind at all. Each fix moved the problem rather than solving it, because a substring test cannot tell "this
+    // shader mentions u_GBuffer_0" from "this shader binds exactly u_MainDepth and u_GBuffer_0 and nothing else".
+    //
+    // Parsing the RDEF chunk gives the real binding table, so a pass can be identified by its exact interface. DXBC
+    // layout: "DXBC", a 16 byte hash, version, total size, chunk count, then chunk offsets. Each chunk is a fourcc, a
+    // size, then data. RDEF holds a resource binding array of 32 byte entries for shader model 5.
+    struct ShaderResources {
+        std::vector<std::string> Textures;
+        bool Valid = false;
+    };
+
+    ShaderResources ParseShaderResources(const void* bytecode, const SIZE_T length)
+    {
+        ShaderResources result;
+        const auto* base = static_cast<const uint8_t*>(bytecode);
+        if (bytecode == nullptr || length < 32) { return result; }
+        if (memcmp(base, "DXBC", 4) != 0) { return result; }
+
+        auto readU32 = [&](const size_t offset) -> uint32_t {
+            uint32_t value = 0;
+            memcpy(&value, base + offset, sizeof(value));
+            return value;
+        };
+
+        const uint32_t chunkCount = readU32(28);
+        if (chunkCount == 0 || chunkCount > 32) { return result; }
+        if (length < 32 + (chunkCount * 4ull)) { return result; }
+
+        for (uint32_t i = 0; i < chunkCount; ++i) {
+            const uint32_t chunkOffset = readU32(32 + (i * 4ull));
+            if (chunkOffset + 8ull > length) { continue; }
+            if (memcmp(base + chunkOffset, "RDEF", 4) != 0) { continue; }
+
+            const size_t rdef = chunkOffset + 8;
+            if (rdef + 16 > length) { return result; }
+
+            const uint32_t bindingCount  = readU32(rdef + 8);
+            const uint32_t bindingOffset = readU32(rdef + 12);
+            if (bindingCount > 128) { return result; }
+
+            for (uint32_t b = 0; b < bindingCount; ++b) {
+                const size_t entry = rdef + bindingOffset + (b * 32ull);
+                if (entry + 32 > length) { return result; }
+
+                const uint32_t nameOffset = readU32(entry);
+                const uint32_t type       = readU32(entry + 4);
+                const size_t   name       = rdef + nameOffset;
+                if (name >= length) { return result; }
+
+                // D3D_SIT_TEXTURE. Constant buffers and samplers are deliberately not collected: the interface that
+                // identifies a pass is which textures it reads.
+                if (type != 2) { continue; }
+
+                const size_t maxLen = length - name;
+                const size_t len    = strnlen(reinterpret_cast<const char*>(base + name), maxLen);
+                if (len == 0 || len == maxLen) { return result; }
+                result.Textures.emplace_back(reinterpret_cast<const char*>(base + name), len);
+            }
+
+            result.Valid = true;
+            return result;
+        }
+        return result;
+    }
+
+    // The engine writes the same binding as "$u_GBuffer_0" in some permutations and "u_GBuffer_0" in others, so the
+    // prefix is never part of the comparison.
+    bool HasTextureNamed(const ShaderResources& resources, const char* name)
+    {
+        for (const auto& texture : resources.Textures) {
+            const char* candidate = texture.c_str();
+            if (*candidate == '$') { ++candidate; }
+            if (strcmp(candidate, name) == 0) { return true; }
+        }
+        return false;
+    }
+
     bool BytecodeContains(const void* bytecode, const SIZE_T length, const char* needle)
     {
         const auto* bytes = static_cast<const char*>(bytecode);
@@ -923,6 +1006,289 @@ namespace {
     {
         if (PlayerSettingsRm.GameMode != EnigmaFix::PlayerSettings::DERQ) { return false; }
         return PlayerSettingsRm.RS.TAAReplaceResolve;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Ground truth AO replacement.
+    //
+    // Discriminating the AO pass from everything else that touches the same resources takes both a positive and a
+    // negative test. AOCB plus $u_GBuffer_0 plus u_MainDepth describes the AO pass -- but DeferredShading has all
+    // three as well, and it is far more expensive to break. It also binds $u_AOBuffer and the other GBuffer planes,
+    // which the AO pass does not, so those are the exclusions. The two ImageSpaceCrossBilateral shaders bind only
+    // $u_AOBuffer and fail the positive test outright.
+    // The AO pass is the only thing in the frame that reads exactly depth and the packed normal plane and nothing
+    // else. Requiring the texture count to be exactly two is what makes this precise: DeferredShading reads the same
+    // two but also albedo, the AO result and shadow maps, and the cross bilateral passes read only the AO result.
+    //
+    // Deliberately says nothing about constant buffers. The engine builds several AO permutations -- one binds AOCB
+    // and MaterialShadingParametersCB for material-driven strength, another binds neither -- and all of them are the
+    // AO pass. Keying on AOCB is exactly the mistake that left the real one unpatched.
+    bool IsImageSpaceAO(const void* bytecode, const SIZE_T length)
+    {
+        const ShaderResources resources = ParseShaderResources(bytecode, length);
+        if (!resources.Valid) { return false; }
+        if (resources.Textures.size() != 2) { return false; }
+        return HasTextureNamed(resources, "u_MainDepth") && HasTextureNamed(resources, "u_GBuffer_0");
+    }
+
+    ID3DBlob* CompiledGroundTruthAOBlob()
+    {
+        static bool      attempted = false;
+        static ID3DBlob* blob      = nullptr;
+        if (attempted) { return blob; }
+        attempted = true;
+
+        const HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
+        if (compiler == nullptr) {
+            spdlog::error("GTAO: could not load d3dcompiler_47.dll, so the AO pass cannot be replaced.");
+            return nullptr;
+        }
+        const auto compile = reinterpret_cast<D3DCompileFn>(
+            reinterpret_cast<void*>(GetProcAddress(compiler, "D3DCompile")));
+        if (compile == nullptr) {
+            spdlog::error("GTAO: d3dcompiler_47.dll has no D3DCompile export.");
+            return nullptr;
+        }
+
+        // Passed as macros rather than patched into the source, so the radius and intensity are baked as literals
+        // and the compiler can fold them. They are fixed at shader creation either way.
+        const std::string radius    = std::to_string(std::max(1, PlayerSettingsRm.RS.SSAORadius)) + ".0";
+        const std::string intensity = std::to_string(std::max(1, PlayerSettingsRm.RS.SSAOIntensity) / 100.0f);
+        const D3D_SHADER_MACRO macros[] = {
+            { "EF_AO_RADIUS",    radius.c_str() },
+            { "EF_AO_INTENSITY", intensity.c_str() },
+            { nullptr, nullptr }
+        };
+
+        ID3DBlob* errors = nullptr;
+        const HRESULT hr = compile(EnigmaFix::kGroundTruthAOHLSL, strlen(EnigmaFix::kGroundTruthAOHLSL),
+                                   "GroundTruthAO", macros, nullptr, "main", "ps_5_0",
+                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &errors);
+        if (FAILED(hr) || blob == nullptr) {
+            spdlog::error("GTAO: shader failed to compile (0x{:08X}): {}", static_cast<uint32_t>(hr),
+                          errors != nullptr ? static_cast<const char*>(errors->GetBufferPointer()) : "no compiler output");
+            if (errors != nullptr) { errors->Release(); }
+            if (blob != nullptr) { blob->Release(); blob = nullptr; }
+            return nullptr;
+        }
+        if (errors != nullptr) { errors->Release(); }
+
+        spdlog::info("GTAO: compiled the replacement AO shader ({} bytes, radius {}, intensity {}).",
+                     blob->GetBufferSize(), radius, intensity);
+        return blob;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Sampler overrides: anisotropic filtering and texture LOD bias.
+    //
+    // Which samplers to touch follows DXVK's long-standing samplerAnisotropy / samplerLodBias behaviour, which is the
+    // battle-tested version of this: skip comparison samplers, skip anything already doing point filtering, upgrade
+    // the rest.
+    //
+    // Both exclusions matter here specifically. Comparison samplers are the shadow map lookups, where anisotropy is
+    // meaningless and a LOD bias would shift the depth comparison. Point samplers are how the whole post processing
+    // chain does exact texel fetches -- the YEBIS composite, the bloom pyramid and the temporal AA neighbourhood all
+    // rely on hitting a specific texel, and filtering them would be actively wrong.
+    //
+    // Post processing linear samplers do survive this filter, but harmlessly: those passes sample with an explicit LOD
+    // so the bias does not apply, and a fullscreen pass has no anisotropy for the filter to act on.
+    bool ShouldOverrideSamplers()
+    {
+        if (PlayerSettingsRm.GameMode != EnigmaFix::PlayerSettings::DERQ) { return false; }
+        return PlayerSettingsRm.RS.AnisotropicFiltering > 0 || PlayerSettingsRm.RS.TextureLODBias != 0;
+    }
+
+    bool IsUpgradeableSampler(const D3D11_SAMPLER_DESC& desc)
+    {
+        if (D3D11_DECODE_IS_COMPARISON_FILTER(desc.Filter)) { return false; }
+
+        switch (desc.Filter) {
+        case D3D11_FILTER_ANISOTROPIC:
+        case D3D11_FILTER_MIN_MAG_MIP_LINEAR:
+        case D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+        case D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT:
+        case D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+        case D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT:
+        case D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR:
+            return true;
+        default:
+            return false;  // Includes MIN_MAG_MIP_POINT and every minimum/maximum reduction filter.
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Draw-time AO substitution.
+    //
+    // Replacing at CreatePixelShader cannot work here. A probe logging every distinct texture signature arriving at
+    // that hook showed exactly one shader reading depth and the normal plane -- "[u_MainDepth $u_GBuffer_0]", 35384
+    // bytes -- while the variant the AO pass actually binds, "[u_MainDepth u_GBuffer_0]" without the prefix, never
+    // appears at all. It is created before the hook is installed, so no matching rule can reach it.
+    //
+    // Binding our shader at the draw instead sidesteps creation entirely. The pass is identified by its render
+    // target: a half resolution R16G16_FLOAT surface, which in this frame is only ever the AO buffer and the two
+    // cross bilateral targets. The bilateral passes read that same buffer as their input, so requiring slot 0 to be
+    // a depth texture separates them.
+    ID3D11PixelShader* groundTruthAOShader = nullptr;
+    std::set<ID3D11PixelShader*> shadersWeCreated;
+
+    // Returns the underlying texture format of a bound SRV, or UNKNOWN. Reading the resource rather than the view
+    // because the view over a depth target is typed (R24_UNORM_X8) while the texture is typeless, and it is the
+    // texture's format that is stable across permutations.
+    DXGI_FORMAT ShaderResourceFormat(ID3D11ShaderResourceView* view)
+    {
+        if (view == nullptr) { return DXGI_FORMAT_UNKNOWN; }
+
+        ID3D11Resource* resource = nullptr;
+        view->GetResource(&resource);
+        if (resource == nullptr) { return DXGI_FORMAT_UNKNOWN; }
+
+        D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        resource->GetType(&dimension);
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC desc = {};
+            static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+            format = desc.Format;
+        }
+        resource->Release();
+        return format;
+    }
+
+    bool IsAmbientOcclusionDraw(ID3D11DeviceContext* pContext, bool& outDepthIsSlotZero)
+    {
+        // Inputs are read and logged before anything is tested. Two previous versions of this filtered first and
+        // logged second, so each one reported only on the passes that had already matched and stayed silent about the
+        // one that did not -- which is the pass we are looking for. Log the input, then decide.
+        ID3D11ShaderResourceView* slots[2] = { nullptr, nullptr };
+        pContext->PSGetShaderResources(0, 2, slots);
+        const DXGI_FORMAT slot0Format = ShaderResourceFormat(slots[0]);
+        const DXGI_FORMAT slot1Format = ShaderResourceFormat(slots[1]);
+        if (slots[0] != nullptr) { slots[0]->Release(); }
+        if (slots[1] != nullptr) { slots[1]->Release(); }
+
+        static std::set<uint64_t> loggedInputs;
+        const uint64_t inputs = (static_cast<uint64_t>(slot0Format) << 32) | static_cast<uint32_t>(slot1Format);
+        if (loggedInputs.insert(inputs).second) {
+            spdlog::info("GTAO probe: Draw(3) inputs slot0 format {} slot1 format {} (want slot1 = {}).",
+                         static_cast<int>(slot0Format), static_cast<int>(slot1Format),
+                         static_cast<int>(DXGI_FORMAT_R16G16B16A16_UNORM));
+        }
+
+        // Depth and the packed normal plane, in either order. The capture shows u_MainDepth at bind point 0 and
+        // $u_GBuffer_0 at bind point 1, but the permutation that actually runs binds them the other way round --
+        // the probe recorded "slot0 11 slot1 44", normals first. That is why the first version of this, which tested
+        // slot 0 for a depth format, never matched: the format list was right, the slot assumption was not.
+        //
+        // Requiring both, in whichever order, is what identifies the pass. The cross bilateral passes bind a single
+        // input, and the only other draw reading GBuffer_0 pairs it with albedo rather than depth.
+        auto isDepthFormat = [](const DXGI_FORMAT format) {
+            return format == DXGI_FORMAT_R24G8_TYPELESS || format == DXGI_FORMAT_D24_UNORM_S8_UINT
+                || format == DXGI_FORMAT_R32_TYPELESS   || format == DXGI_FORMAT_D32_FLOAT;
+        };
+        // Depth in either slot, and nothing else required. The normal plane is deliberately not part of this: the
+        // permutation that runs binds no second texture, so requiring one is what kept this from ever matching.
+        //
+        // That alone is not selective enough, but combined with the R16G16_FLOAT render target below it is: only the
+        // AO pass and the two cross bilateral passes write that format, and the bilaterals read the AO buffer rather
+        // than depth. DownSampleGBuffer0 does pair GBuffer_0 with depth, but writes R16G16B16A16_UNORM.
+        const bool zeroIsDepth = isDepthFormat(slot0Format);
+        const bool oneIsDepth  = isDepthFormat(slot1Format);
+        if (!zeroIsDepth && !oneIsDepth) { return false; }
+        outDepthIsSlotZero = zeroIsDepth;
+
+        ID3D11RenderTargetView* view = nullptr;
+        pContext->OMGetRenderTargets(1, &view, nullptr);
+        if (view == nullptr) { return false; }
+
+        ID3D11Resource* resource = nullptr;
+        view->GetResource(&resource);
+        view->Release();
+        if (resource == nullptr) { return false; }
+
+        D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        resource->GetType(&dimension);
+        if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D) { resource->Release(); return false; }
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+        resource->Release();
+
+        // Every fullscreen triangle's target, one line per distinct shape. The narrower logging this replaces only
+        // fired after the format and size tests had already passed, so a pass failing those tests stayed invisible --
+        // which is exactly the position the AO pass turned out to be in.
+        static std::set<uint64_t> loggedTargets;
+        const uint64_t shape = (static_cast<uint64_t>(desc.Format) << 48)
+                             | (static_cast<uint64_t>(desc.Width)  << 24)
+                             |  static_cast<uint64_t>(desc.Height);
+        if (loggedTargets.insert(shape).second) {
+            spdlog::info("GTAO probe: Draw(3) target format {} at {}x{} (looking for format {} at {}x{}).",
+                         static_cast<int>(desc.Format), desc.Width, desc.Height,
+                         static_cast<int>(DXGI_FORMAT_R16G16_FLOAT),
+                         *InternalHorizontalRes / 2, *InternalVerticalRes / 2);
+        }
+
+        // Format only. Size is not tested: see the note above.
+        return desc.Format == DXGI_FORMAT_R16G16_FLOAT;
+    }
+
+
+    void SubstituteAmbientOcclusionShader(ID3D11DeviceContext* pContext)
+    {
+        ID3D11PixelShader* current = nullptr;
+        pContext->PSGetShader(&current, nullptr, nullptr);
+        if (current == nullptr) { return; }
+
+        // Already ours, either from this path or from the creation hook catching a different permutation.
+        if (current == groundTruthAOShader || shadersWeCreated.count(current) > 0) {
+            current->Release();
+            return;
+        }
+        current->Release();
+
+        bool depthIsSlotZero = true;
+        if (!IsAmbientOcclusionDraw(pContext, depthIsSlotZero)) { return; }
+
+        if (groundTruthAOShader == nullptr) {
+            ID3DBlob* blob = CompiledGroundTruthAOBlob();
+            if (blob == nullptr) { return; }
+
+            ID3D11Device* device = nullptr;
+            pContext->GetDevice(&device);
+            if (device == nullptr) { return; }
+
+            const HRESULT hr = device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                         &groundTruthAOShader);
+            device->Release();
+            if (FAILED(hr) || groundTruthAOShader == nullptr) {
+                spdlog::error("GTAO: could not create the replacement shader at draw time (0x{:08X}).",
+                              static_cast<uint32_t>(hr));
+                groundTruthAOShader = nullptr;
+                return;
+            }
+            spdlog::info("GTAO: bound the replacement AO shader at draw time. The engine's own AO shader is created "
+                         "before our hooks are installed, so it can only be swapped here.");
+        }
+
+        pContext->PSSetShader(groundTruthAOShader, nullptr, 0);
+
+        // Our shader declares u_MainDepth at t0 and u_GBuffer_0 at t1. The permutation being replaced binds them the
+        // other way round, so without reordering here the shader would read the normal plane as depth and produce
+        // confident nonsense. Rebinding costs one call and removes the dependency on which order the engine used.
+        if (!depthIsSlotZero) {
+            ID3D11ShaderResourceView* slots[2] = { nullptr, nullptr };
+            pContext->PSGetShaderResources(0, 2, slots);
+            ID3D11ShaderResourceView* reordered[2] = { slots[1], slots[0] };
+            pContext->PSSetShaderResources(0, 2, reordered);
+            if (slots[0] != nullptr) { slots[0]->Release(); }
+            if (slots[1] != nullptr) { slots[1]->Release(); }
+        }
+    }
+
+    bool ShouldReplaceAmbientOcclusion()
+    {
+        if (PlayerSettingsRm.GameMode != EnigmaFix::PlayerSettings::DERQ) { return false; }
+        if (!PlayerSettingsRm.RS.SSAO) { return false; }  // Nothing to replace if AO is switched off entirely.
+        return PlayerSettingsRm.RS.SSAOMode == 1;
     }
 
     bool ShouldApplyTemporalJitter()
@@ -1583,7 +1949,112 @@ namespace EnigmaFix {
             }
         }
 
+        // Diagnostic. The AO pass reflects exactly the interface the matcher wants, yet was not being replaced, and
+        // three rounds of reasoning about why produced three wrong answers. This reports what actually arrives at the
+        // hook -- one line per distinct texture signature, so it is bounded -- which distinguishes "the shader never
+        // reaches us" from "it reaches us and the parse rejects it". Remove once that is settled.
+        if (ShouldReplaceAmbientOcclusion()) {
+            const ShaderResources seen = ParseShaderResources(pShaderBytecode, BytecodeLength);
+            if (!seen.Valid) {
+                static std::set<uint64_t> loggedFailures;
+                if (loggedFailures.insert(static_cast<uint64_t>(BytecodeLength)).second) {
+                    spdlog::info("GTAO probe: could not parse the resource table of a {} byte pixel shader.",
+                                 static_cast<uint64_t>(BytecodeLength));
+                }
+            }
+            else if (seen.Textures.size() <= 3) {
+                std::string signature;
+                for (const auto& texture : seen.Textures) { signature += texture; signature += ' '; }
+
+                static std::set<std::string> loggedSignatures;
+                if (loggedSignatures.insert(signature).second) {
+                    spdlog::info("GTAO probe: pixel shader with {} textures [{}] ({} bytes){}.",
+                                 seen.Textures.size(), signature, static_cast<uint64_t>(BytecodeLength),
+                                 IsImageSpaceAO(pShaderBytecode, BytecodeLength) ? " -- MATCHES" : "");
+                }
+            }
+        }
+
+        // Creation-time AO replacement is disabled. "Exactly two textures named u_MainDepth and u_GBuffer_0" does
+        // not describe the AO pass -- it describes DownSampleGBuffer0, which pairs those same two and writes the
+        // downsampled normal planes at 1720x720, 960x540 and 640x360. Replacing it with an AO shader corrupted the
+        // whole downsample chain, which is what the vertical striping in indoor scenes was.
+        //
+        // The AO pass the game actually runs binds depth alone, so it cannot be told apart from other depth-only
+        // passes by its resource table at all. Draw-time substitution, which can also see the render target, is the
+        // only mechanism with enough information. Left in place rather than deleted because the identification work
+        // is still valid for permutations that do bind both.
+        if (false && ShouldReplaceAmbientOcclusion() && IsImageSpaceAO(pShaderBytecode, BytecodeLength)) {
+            if (ID3DBlob* replacement = CompiledGroundTruthAOBlob()) {
+                const HRESULT hr = rm_Instance.oCreatePixelShader(pDevice, replacement->GetBufferPointer(),
+                                                                  replacement->GetBufferSize(), pClassLinkage,
+                                                                  ppPixelShader);
+                if (SUCCEEDED(hr)) {
+                    // Remembered so the draw-time path never mistakes our own shader for the engine's and swaps it
+                    // again on every frame.
+                    if (ppPixelShader != nullptr && *ppPixelShader != nullptr) {
+                        shadersWeCreated.insert(*ppPixelShader);
+                    }
+                    // Counted because more than one match would mean the discriminator is too loose and something
+                    // other than the AO pass is being overwritten -- worth seeing rather than guessing at.
+                    static int replaced = 0;
+                    ++replaced;
+                    spdlog::info("GTAO: replaced AO shader variant {} (original was {} bytes).", replaced,
+                                 static_cast<uint64_t>(BytecodeLength));
+                    if (replaced > 1) {
+                        spdlog::warn("GTAO: more than one shader matched the AO signature. If the image looks wrong, "
+                                     "the match is catching a pass it should not.");
+                    }
+                    return hr;
+                }
+                spdlog::error("GTAO: the replacement was rejected by the device (0x{:08X}); keeping the engine's "
+                              "shader.", static_cast<uint32_t>(hr));
+            }
+        }
+
         return rm_Instance.oCreatePixelShader(pDevice, pShaderBytecode, BytecodeLength, pClassLinkage, ppPixelShader);
+    }
+
+    HRESULT __stdcall RenderManager::hkCreateSamplerState(ID3D11Device* pDevice,
+                                                          const D3D11_SAMPLER_DESC* pSamplerDesc,
+                                                          ID3D11SamplerState** ppSamplerState)
+    {
+        if (rm_Instance.oCreateSamplerState == nullptr) { return E_FAIL; }
+        if (pSamplerDesc == nullptr || !ShouldOverrideSamplers() || !IsUpgradeableSampler(*pSamplerDesc)) {
+            return rm_Instance.oCreateSamplerState(pDevice, pSamplerDesc, ppSamplerState);
+        }
+
+        D3D11_SAMPLER_DESC desc = *pSamplerDesc;
+
+        const int anisotropy = PlayerSettingsRm.RS.AnisotropicFiltering;
+        if (anisotropy > 1) {
+            desc.Filter        = D3D11_FILTER_ANISOTROPIC;
+            desc.MaxAnisotropy = static_cast<UINT>(std::clamp(anisotropy, 2, 16));
+        }
+
+        // Stored in tenths so the setting can stay an int like every other one here.
+        const int biasTenths = std::clamp(PlayerSettingsRm.RS.TextureLODBias, -40, 40);
+        if (biasTenths != 0) {
+            desc.MipLODBias = std::clamp(desc.MipLODBias + (static_cast<float>(biasTenths) / 10.0f), -15.99f, 15.99f);
+        }
+
+        const HRESULT hr = rm_Instance.oCreateSamplerState(pDevice, &desc, ppSamplerState);
+        if (FAILED(hr)) {
+            // A driver that rejects the modified description should not cost the game its sampler.
+            spdlog::warn("Samplers: the device rejected an overridden sampler (0x{:08X}); using the engine's original.",
+                         static_cast<uint32_t>(hr));
+            return rm_Instance.oCreateSamplerState(pDevice, pSamplerDesc, ppSamplerState);
+        }
+
+        static int overridden = 0;
+        ++overridden;
+        if (overridden == 1) {
+            spdlog::info("Samplers: forcing {}x anisotropic filtering with a {:.1f} mip LOD bias on filtered samplers. "
+                         "Comparison and point samplers are left alone.",
+                         anisotropy > 1 ? std::clamp(anisotropy, 2, 16) : 1,
+                         static_cast<float>(biasTenths) / 10.0f);
+        }
+        return hr;
     }
 
     // Another hook that contains the needed logic for running checks on Viewports and Scissor Rects.
@@ -1592,6 +2063,12 @@ namespace EnigmaFix {
         if (rm_Instance.oDraw == nullptr) { return E_FAIL; }  // Never bound; nothing safe to forward to.
 
         ResizePostProcessRasterizerState(pContext);
+
+        // The AO pass is a fullscreen triangle, so this costs a handful of COM calls on the few Draw(3) calls per
+        // frame rather than on every draw in the scene.
+        if (VertexCount == 3 && ShouldReplaceAmbientOcclusion()) {
+            SubstituteAmbientOcclusionShader(pContext);
+        }
         return rm_Instance.oDraw(pContext, VertexCount, StartVertexLocation);
     }
 
@@ -1620,6 +2097,8 @@ namespace EnigmaFix {
                         kiero::bind(76, reinterpret_cast<void**>(&oUnmap), reinterpret_cast<void*>(this->hkUnmap));
                         // Swaps the temporal AA resolve as the engine builds its shaders.
                         kiero::bind(33, reinterpret_cast<void**>(&oCreatePixelShader), reinterpret_cast<void*>(this->hkCreatePixelShader));
+                        // Forces anisotropic filtering and a texture LOD bias as the engine builds its sampler states.
+                        kiero::bind(41, reinterpret_cast<void**>(&oCreateSamplerState), reinterpret_cast<void*>(this->hkCreateSamplerState));
                         break;
                     }
                     case PlayerSettings::DERQ2: {
